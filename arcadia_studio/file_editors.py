@@ -301,6 +301,8 @@ class HexEditor(_Base):
         self.view.setLineWrapMode(QPlainTextEdit.NoWrap); self.view.setLayoutDirection(Qt.LeftToRight)
         self.v.addWidget(self.view, 1)
         self.status = QLabel(); self.v.addWidget(self.status)
+        if self.data[:4] in (b'SCE\x00', b'NPD\x00'):
+            self.add_btn('🔓 فك التشفير', self.decrypt)
         self.add_btn('✏ كتابة بايتات عند عنوان', self.patch)
         self.add_btn('🔁 بحث واستبدال', self.find_replace, 'ghost')
         self.add_btn('💾 حفظ', self.save)
@@ -361,6 +363,17 @@ class HexEditor(_Base):
 
     def save(self):
         open(self.path, 'wb').write(self.data); QMessageBox.information(self, 'تم', 'تم الحفظ')
+
+    def decrypt(self):
+        from .core.ps3crypto import decrypt_file
+        from PySide6.QtCore import QSettings
+        rap = QSettings('Cruyfford', 'ArcadiaStudio').value('rap_dir', '')
+        try:
+            out, how, n = decrypt_file(self.path, rap_dirs=[rap, os.path.dirname(self.path)])
+        except Exception as e:  # noqa
+            QMessageBox.critical(self, 'فك التشفير', str(e)); return
+        QMessageBox.information(self, 'تم', 'تم فك التشفير (%s):\n%s' % (how, out))
+        open_editor(self.parent(), out, 'hex')
 
 
 EDITORS = {'text': TextEditor, 'image': ImageEditor, 'sfo': SfoEditor, 'font': FontViewer, 'media': MediaFile, 'hex': HexEditor}

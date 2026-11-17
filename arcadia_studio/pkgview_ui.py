@@ -52,6 +52,8 @@ class PkgViewer(QDialog):
         # edit-mode toolbar (hidden until editing)
         self.edit_bar = QWidget(); eb = QHBoxLayout(self.edit_bar); eb.setContentsMargins(0, 0, 0, 0)
         for t, fn, k in [('📝 تعديل الملف', self.edit_file, ''), ('🔢 Hex', lambda: self.edit_file('hex'), 'ghost'),
+                         ('🔓 فك التشفير', self.decrypt_sel, ''), ('🔓 فك تشفير الكل', self.decrypt_all, 'ghost'),
+                         ('🔑 مجلد الرخص RAP', self.pick_rap, 'ghost'),
                          ('✏ تغيير الاسم', self.edit_title, 'ghost'), ('🖼 تغيير الأيقونة', lambda: self.replace_image('ICON0.PNG', (320, 176)), 'ghost'),
                          ('🌄 تغيير الخلفية', lambda: self.replace_image('PIC1.PNG', (1920, 1080)), 'ghost'),
                          ('➕ إضافة / استبدال ملف', self.add_file, 'ghost'), ('🗑 حذف المحدد', self.delete_sel, 'danger'),
@@ -214,6 +216,59 @@ class PkgViewer(QDialog):
         from .file_editors import open_editor
         dlg = open_editor(self, p, force)
         if dlg: dlg.finished.connect(lambda *_: self.refresh_edit())
+
+    # ---------- decryption (SELF/SPRX/EDAT/SDAT)
+    def rap_dirs(self):
+        d = self.win.settings.value('rap_dir', '')
+        out = [d] if d else []
+        if self.edit_dir: out.append(self.edit_dir)
+        return out
+
+    def pick_rap(self):
+        d = QFileDialog.getExistingDirectory(self, 'اختر المجلد الذي فيه ملفات الرخص .rap', self.win.settings.value('rap_dir', ''))
+        if d:
+            self.win.settings.setValue('rap_dir', d)
+            n = len([f for f in os.listdir(d) if f.lower().endswith('.rap')])
+            QMessageBox.information(self, 'الرخص', 'تم. عدد ملفات RAP في المجلد: %d' % n)
+
+    def _decrypt(self, paths):
+        from .core.ps3crypto import decrypt_file, detect
+        paths = [p for p in paths if os.path.isfile(p) and detect(p)]
+        if not paths:
+            QMessageBox.information(self, 'فك التشفير', 'لا توجد ملفات مشفّرة (SELF/SPRX/EDAT/SDAT) في التحديد'); return
+        dirs = self.rap_dirs()
+
+        def job(prog):
+            ok, bad = [], []
+            for i, p in enumerate(paths):
+                try:
+                    out, how, n = decrypt_file(p, rap_dirs=dirs)
+                    ok.append('✅ %s ← %s (%s)' % (os.path.relpath(out, self.edit_dir), os.path.basename(p), how))
+                except Exception as e:  # noqa
+                    bad.append('❌ %s: %s' % (os.path.basename(p), e))
+                prog(i + 1, len(paths))
+            return ok, bad
+
+        def done(r):
+            ok, bad = r
+            self.refresh_edit()
+            msg = '\n'.join(ok + bad)
+            msg += '\n\nالملفات المفكوكة تُحفظ بجانب الأصلية (EBOOT.elf، .prx، أو بدون .edat).'
+            (QMessageBox.warning if bad and not ok else QMessageBox.information)(self, 'فك التشفير', msg[:3500])
+        self._run(job, done)
+
+    def decrypt_sel(self):
+        if not self.edit_dir:
+            QMessageBox.information(self, 'تنبيه', 'اضغط "تعديل الحزمة" أولاً'); return
+        self._decrypt([os.path.join(self.edit_dir, it.data(0, Qt.UserRole)) for it in self.tree.selectedItems()])
+
+    def decrypt_all(self):
+        if not self.edit_dir:
+            QMessageBox.information(self, 'تنبيه', 'اضغط "تعديل الحزمة" أولاً'); return
+        ps = []
+        for base, _, files in os.walk(self.edit_dir):
+            ps += [os.path.join(base, f) for f in files]
+        self._decrypt(ps)
 
     def edit_title(self):
         p = os.path.join(self.edit_dir, 'PARAM.SFO')
