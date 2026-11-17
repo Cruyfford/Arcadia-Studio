@@ -170,9 +170,9 @@ class PkgViewer(QDialog):
     # actions
     def _run(self, fn, msg_done):
         from .app import Worker
-        self.prog.show(); self.prog.setValue(0)
+        self.prog.show(); self.prog.setRange(0, 0); self.prog.setFormat('%p%')
         self.w = Worker(fn)
-        self.w.progress.connect(lambda a, b: (self.prog.setMaximum(max(b, 1)), self.prog.setValue(a)))
+        self.w.progress.connect(lambda a, b: (self.prog.setRange(0, max(b, 1)), self.prog.setValue(a)))
         self.w.done.connect(lambda r: (self.prog.hide(), msg_done(r)))
         self.w.failed.connect(lambda e: (self.prog.hide(), QMessageBox.critical(self, 'خطأ', e)))
         self.w.start()

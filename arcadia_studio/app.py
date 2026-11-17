@@ -69,6 +69,8 @@ QListWidget#nav::item:hover { background: #1f2858; }
 QListWidget#nav::item:selected { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7c3aed, stop:1 #2f5bff); color: #fff; }
 QLabel#brand { font-size: 17px; font-weight: bold; color: #e9e3ff; letter-spacing: 2px; }
 QLabel#proj { color: #8f9bd0; font-size: 12px; padding: 8px; background: #121833; border-radius: 10px; }
+QWidget#busy { background: #1a2150; border-radius: 10px; }
+QWidget#busy QLabel { color: #e8ecff; font-weight: bold; }
 QLabel#card { background: #121833; border: 1px solid #262f5e; border-radius: 14px; padding: 14px; }
 """ + MENU_STYLE
 
@@ -287,8 +289,13 @@ class Main(QMainWindow):
         self.nav.setCurrentRow(0)
         self.setAcceptDrops(True)
 
-        self.prog = QProgressBar(); self.prog.setMaximumWidth(320); self.prog.hide()
-        self.statusBar().addPermanentWidget(self.prog)
+        # progress panel for background jobs (percent + remaining time), visible while something runs
+        self.jobs = {}; self._job_n = 0; self.workers = set()
+        self.busy = QWidget(); self.busy.setObjectName('busy'); bl = QHBoxLayout(self.busy); bl.setContentsMargins(14, 6, 14, 6)
+        self.busy_lbl = QLabel(); self.prog = QProgressBar(); self.prog.setMinimumWidth(420); self.prog.setFixedHeight(24)
+        self.prog.setFormat('%p%')
+        bl.addWidget(self.busy_lbl, 1); bl.addWidget(self.prog)
+        self.statusBar().addPermanentWidget(self.busy, 1); self.busy.hide()
         self.statusBar().showMessage('ملف ← فتح مشروع أركاديا (.arcadia) أو فتح حزمة المتجر PKG للبدء')
         last = self.settings.value('last_ws')
         if last and os.path.exists(os.path.join(last, ROOT_XML)):
@@ -386,12 +393,37 @@ class Main(QMainWindow):
 
     # ---------------- workspace
     def run_bg(self, fn, done, msg):
-        self.prog.show(); self.prog.setValue(0); self.statusBar().showMessage(msg)
-        self.w = Worker(fn)
-        self.w.progress.connect(lambda a, b: (self.prog.setMaximum(max(b, 1)), self.prog.setValue(a)))
-        self.w.done.connect(lambda r: (self.prog.hide(), done(r)))
-        self.w.failed.connect(lambda e: (self.prog.hide(), QMessageBox.critical(self, 'خطأ', e)))
-        self.w.start()
+        """run fn(progress) in a thread; several jobs may run at once, each keeps its own progress"""
+        self._job_n += 1; jid = self._job_n
+        self.jobs[jid] = {'msg': msg, 'a': 0, 'b': 0, 't0': time.time()}
+        w = Worker(fn); self.w = w; self.workers.add(w)
+
+        def finish():
+            self.jobs.pop(jid, None); self.workers.discard(w); self._show_jobs()
+        w.progress.connect(lambda a, b: (self.jobs.get(jid, {}).update(a=a, b=b), self._show_jobs()))
+        w.done.connect(lambda r: (finish(), self.statusBar().showMessage('✔ تم: ' + msg.replace('جاري ', '').rstrip('.'), 8000), done(r)))
+        w.failed.connect(lambda e: (finish(), self.statusBar().showMessage('✖ فشل: ' + msg, 8000), QMessageBox.critical(self, 'خطأ', e)))
+        self._show_jobs(); w.start()
+
+    def _show_jobs(self):
+        if not self.jobs:
+            self.busy.hide(); QApplication.restoreOverrideCursor() if QApplication.overrideCursor() else None; return
+        if not QApplication.overrideCursor(): QApplication.setOverrideCursor(Qt.BusyCursor)
+        jid = max(self.jobs); j = self.jobs[jid]
+        a, b = j['a'], j['b']
+        if b > 0:
+            self.prog.setRange(0, 1000); self.prog.setValue(int(1000 * min(a, b) / b))
+            frac = min(a, b) / b; el = time.time() - j['t0']
+            if frac > 0.02 and el > 2:
+                left = el * (1 - frac) / frac
+                self.prog.setFormat('%p%   —   متبقي ' + ('%d ث' % left if left < 60 else '%d د %d ث' % (left // 60, left % 60)))
+            else:
+                self.prog.setFormat('%p%')
+        else:
+            self.prog.setRange(0, 0)   # unknown length: moving bar
+        more = '   (+%d مهمة أخرى)' % (len(self.jobs) - 1) if len(self.jobs) > 1 else ''
+        self.busy_lbl.setText('⏳ ' + j['msg'] + more)
+        self.busy.show()
 
     def open_pkg(self):
         p, _ = QFileDialog.getOpenFileName(self, 'اختر ملف PKG', '', 'PS3 PKG (*.pkg)')
@@ -491,6 +523,7 @@ class Main(QMainWindow):
             return ws
 
         def done(w):
+            self.statusBar().showMessage('✔ المتجر الأساسي جاهز: ' + w, 10000)
             if not projmod.is_store_root(w):
                 QMessageBox.warning(self, 'تنبيه', 'هذه الحزمة ليست متجر أركاديا/VIDEOSTORE'); return
             self.settings.setValue('base_pkg', p); self.settings.setValue('base_ws', w)
