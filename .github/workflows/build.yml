@@ -2,6 +2,8 @@ name: Build Arcadia Studio (Windows EXE)
 on:
   push:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: windows-latest
@@ -27,3 +29,16 @@ jobs:
         with:
           name: ArcadiaStudio-Windows
           path: dist/ArcadiaStudio.exe
+      - name: Publish EXE (release + build branch)
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest dist/ArcadiaStudio.exe -t "Arcadia Studio (latest)" -n "Windows EXE - built from ${GITHUB_SHA::7}"
+          mkdir out && cp dist/ArcadiaStudio.exe out/ && cd out
+          git init -q && git checkout -q -b build
+          git -c user.name=ci -c user.email=ci@local add ArcadiaStudio.exe
+          git -c user.name=ci -c user.email=ci@local commit -q -m "build ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" build
