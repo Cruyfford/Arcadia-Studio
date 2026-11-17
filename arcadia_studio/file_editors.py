@@ -1,4 +1,5 @@
 """Editors for files inside a PKG (edit mode): text/XML, images, PARAM.SFO, fonts, hex (any file)."""
+from .ui_common import context_menu, add, shortcut
 import os
 import re
 import shutil
@@ -8,7 +9,7 @@ import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QPixmap, QFontDatabase, QTextCursor
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit, QLabel, QFileDialog,
+from PySide6.QtWidgets import (QDialog, QMenuBar, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit, QLabel, QFileDialog,
                                QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, QComboBox,
                                QInputDialog, QScrollArea)
 
@@ -66,16 +67,33 @@ class _Base(QDialog):
             l = QLabel('⚠️ ' + info); l.setStyleSheet('color:#ffcc66'); self.v.addWidget(l)
         self.bar = QHBoxLayout()
 
-    def add_btn(self, text, fn, kind=''):
-        b = QPushButton(text); b.clicked.connect(fn)
-        if kind: b.setProperty('kind', kind)
-        self.bar.addWidget(b); return b
+    def add_btn(self, text, fn, kind='', keys=None):
+        """tools go to the menu bar + right-click menu (no buttons)"""
+        if not hasattr(self, 'tools'): self.tools = []
+        self.tools.append((text, fn, keys))
+
+    def _fill(self, m):
+        for text, fn, keys in self.tools:
+            if text == '-': m.addSeparator(); continue
+            add(m, text, fn, shortcut=keys)
 
     def common_buttons(self):
-        self.add_btn('📤 تصدير نسخة', self.export, 'ghost')
-        self.add_btn('📥 استبدال بملف', self.replace, 'ghost')
-        self.add_btn('↗ فتح ببرنامج خارجي', lambda: open_external(self.path), 'ghost')
-        self.v.addLayout(self.bar)
+        self.add_btn('-', None)
+        self.add_btn('📤 تصدير نسخة...', self.export)
+        self.add_btn('📥 استبدال بملف...', self.replace)
+        self.add_btn('↗ فتح ببرنامج خارجي', lambda: open_external(self.path))
+        mb = QMenuBar(self); self.v.setMenuBar(mb)
+        self._fill(mb.addMenu('⚙ الأدوات'))
+        for text, fn, keys in self.tools:
+            if keys and fn: shortcut(self, keys, fn)
+        targets = [self] + [w for w in (getattr(self, n, None) for n in ('ed', 'view', 'lbl', 'table')) if w is not None]
+        for w in targets:
+            if isinstance(w, QPlainTextEdit):
+                context_menu(w, lambda m, pos, w=w: (m.addActions(w.createStandardContextMenu().actions()), m.addSeparator(), self._fill(m)))
+            else:
+                context_menu(w, lambda m, pos: self._fill(m))
+        hint = QLabel('💡 الأدوات في قائمة «⚙ الأدوات» بالأعلى أو بالكلك يمين'); hint.setStyleSheet('color:#7f8bc0')
+        self.v.addWidget(hint)
 
     def export(self):
         p, _ = QFileDialog.getSaveFileName(self, 'تصدير', os.path.basename(self.path))
@@ -99,14 +117,17 @@ class TextEditor(_Base):
         find = QHBoxLayout()
         self.f_find, self.f_rep = QLineEdit(), QLineEdit()
         self.f_find.setPlaceholderText('بحث...'); self.f_rep.setPlaceholderText('استبدال بـ...')
-        bf = QPushButton('🔍 التالي'); bf.setProperty('kind', 'ghost'); bf.clicked.connect(self.find_next)
-        br = QPushButton('استبدال الكل'); br.setProperty('kind', 'ghost'); br.clicked.connect(self.replace_all)
-        find.addWidget(self.f_find); find.addWidget(self.f_rep); find.addWidget(bf); find.addWidget(br)
+        self.f_find.setPlaceholderText('بحث... (Enter = التالي)'); self.f_rep.setPlaceholderText('استبدال بـ... (Enter = استبدال الكل)')
+        self.f_find.returnPressed.connect(self.find_next); self.f_rep.returnPressed.connect(self.replace_all)
+        find.addWidget(self.f_find); find.addWidget(self.f_rep)
         self.enc = QComboBox(); self.enc.addItems(['utf-8', 'utf-16', 'latin-1', 'cp1256', 'shift_jis'])
         find.addWidget(QLabel('الترميز:')); find.addWidget(self.enc)
         self.v.addLayout(find)
         self.v.addWidget(self.ed, 1)
-        self.add_btn('💾 حفظ', self.save)
+        self.add_btn('💾 حفظ', self.save, keys='Ctrl+S')
+        self.add_btn('🔍 البحث التالي', self.find_next, keys='F3')
+        self.add_btn('🔁 استبدال الكل', self.replace_all)
+        self.add_btn('-', None)
         self.add_btn('ع ← XMB: تحويل النص المحدد لعربي الجهاز', self.to_xmb, 'ghost')
         self.add_btn('XMB → ع: قراءة عربي الجهاز', self.from_xmb, 'ghost')
         self.common_buttons()
@@ -212,7 +233,7 @@ class SfoEditor(_Base):
         self.t.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.v.addWidget(QLabel('عدّل القيم في عمود "القيمة" ثم احفظ. النصوص لها حد أقصى للطول.'))
         self.v.addWidget(self.t, 1)
-        self.add_btn('💾 حفظ', self.save)
+        self.add_btn('💾 حفظ', self.save, keys='Ctrl+S')
         self.common_buttons(); self.reload()
 
     def _entries(self, data):
@@ -290,12 +311,10 @@ class HexEditor(_Base):
         self.data = bytearray(open(path, 'rb').read()); self.pos = 0
         nav = QHBoxLayout()
         self.e_off = QLineEdit('0'); self.e_off.setMaximumWidth(160)
-        bgo = QPushButton('↩ اذهب للعنوان'); bgo.setProperty('kind', 'ghost'); bgo.clicked.connect(self.goto)
-        bp = QPushButton('◀ السابق'); bp.setProperty('kind', 'ghost'); bp.clicked.connect(lambda: self.show_at(self.pos - self.PAGE))
-        bn = QPushButton('التالي ▶'); bn.setProperty('kind', 'ghost'); bn.clicked.connect(lambda: self.show_at(self.pos + self.PAGE))
-        self.e_find = QLineEdit(); self.e_find.setPlaceholderText('بحث: نص أو hex مثل 7F454C46')
-        bf = QPushButton('🔍 بحث'); bf.setProperty('kind', 'ghost'); bf.clicked.connect(self.search)
-        for w in (QLabel('العنوان (hex):'), self.e_off, bgo, bp, bn, self.e_find, bf): nav.addWidget(w)
+        self.e_off.returnPressed.connect(self.goto)
+        self.e_find = QLineEdit(); self.e_find.setPlaceholderText('بحث: نص أو hex مثل 7F454C46 — Enter للبحث')
+        self.e_find.returnPressed.connect(self.search)
+        for w in (QLabel('العنوان (hex) + Enter:'), self.e_off, self.e_find): nav.addWidget(w)
         self.v.addLayout(nav)
         self.view = QPlainTextEdit(); self.view.setReadOnly(True); self.view.setFont(QFont('Consolas', 11))
         self.view.setLineWrapMode(QPlainTextEdit.NoWrap); self.view.setLayoutDirection(Qt.LeftToRight)
@@ -303,9 +322,15 @@ class HexEditor(_Base):
         self.status = QLabel(); self.v.addWidget(self.status)
         if self.data[:4] in (b'SCE\x00', b'NPD\x00'):
             self.add_btn('🔓 فك التشفير', self.decrypt)
+            self.add_btn('-', None)
+        self.add_btn('↩ اذهب للعنوان', self.goto, keys='Ctrl+G')
+        self.add_btn('◀ الصفحة السابقة', lambda: self.show_at(self.pos - self.PAGE), keys='PgUp')
+        self.add_btn('التالي ▶ الصفحة التالية', lambda: self.show_at(self.pos + self.PAGE), keys='PgDown')
+        self.add_btn('🔍 بحث', self.search, keys='F3')
+        self.add_btn('-', None)
         self.add_btn('✏ كتابة بايتات عند عنوان', self.patch)
         self.add_btn('🔁 بحث واستبدال', self.find_replace, 'ghost')
-        self.add_btn('💾 حفظ', self.save)
+        self.add_btn('💾 حفظ', self.save, keys='Ctrl+S')
         self.common_buttons(); self.show_at(0)
 
     def reload(self):

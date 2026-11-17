@@ -30,6 +30,9 @@ class Store:
         self.src = json.load(open(p, encoding='utf-8')) if os.path.exists(p) else {}
         pp = os.path.join(root, '.arcadia_pending.json')
         self.changed = set(json.load(open(pp))) if os.path.exists(pp) else set()
+        # light projects (.arcadia): images come from the base store folder if known, else from thumbnails
+        self.alt_roots = []
+        self.thumbs = os.path.join(root, '.thumbs')
 
     # ---------- files
     def text(self, rel):
@@ -71,7 +74,14 @@ class Store:
 
     def abs_path(self, ps3path):
         rel = self.ps3_to_rel(ps3path)
-        return os.path.join(self.root, rel) if rel else None
+        if not rel: return None
+        p = os.path.join(self.root, rel)
+        if os.path.exists(p): return p
+        for r in self.alt_roots:
+            q = os.path.join(r, rel)
+            if os.path.exists(q): return q
+        t = os.path.join(self.thumbs, rel + '.webp')
+        return t if os.path.exists(t) else p
 
     def resolve(self, cur_rel, src):
         """Query src -> (rel_file, view_id)"""

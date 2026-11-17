@@ -119,25 +119,34 @@ class PkgReader:
 
 def build_pkg(template_pkg, src_dir, out_path, progress=None):
     """Rebuild a debug PKG from src_dir, reusing header/metadata of template_pkg.
-    New files and directories found in src_dir are appended automatically."""
+    New files and directories found in src_dir are appended automatically.
+    src_dir may be a list of folders: earlier folders override later ones (light project over base store)."""
     r = PkgReader(template_pkg)
     h = bytearray(r.header)
     items = [(n.encode(), fl) for n, _, _, fl in r.entries()]
     known = {n for n, _ in items}
-    for base, dirs, files in os.walk(src_dir):
-        dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
-        files = sorted(f for f in files if not f.startswith('.'))
-        rel_base = os.path.relpath(base, src_dir).replace(os.sep, '/')
-        for d in dirs:
-            rel = (d if rel_base == '.' else rel_base + '/' + d).encode()
-            if rel not in known:
-                items.append((rel, 0x80000004)); known.add(rel)
-        for fn in files:
-            rel = (fn if rel_base == '.' else rel_base + '/' + fn).encode()
-            if rel not in known:
-                items.append((rel, 0x80000003)); known.add(rel)
+    roots = list(src_dir) if isinstance(src_dir, (list, tuple)) else [src_dir]
+
+    def locate(rel):
+        for rt in roots:
+            p = os.path.join(rt, rel)
+            if os.path.exists(p): return p
+        return os.path.join(roots[-1], rel)
+    for root in roots:
+        for base, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+            files = sorted(f for f in files if not f.startswith('.'))
+            rel_base = os.path.relpath(base, root).replace(os.sep, '/')
+            for d in dirs:
+                rel = (d if rel_base == '.' else rel_base + '/' + d).encode()
+                if rel not in known:
+                    items.append((rel, 0x80000004)); known.add(rel)
+            for fn in files:
+                rel = (fn if rel_base == '.' else rel_base + '/' + fn).encode()
+                if rel not in known:
+                    items.append((rel, 0x80000003)); known.add(rel)
     # drop items that no longer exist on disk
-    items = [(n, fl) for n, fl in items if os.path.exists(os.path.join(src_dir, n.decode()))]
+    items = [(n, fl) for n, fl in items if os.path.exists(locate(n.decode()))]
     n = len(items)
     off = n * 32
     noffs = []
@@ -145,7 +154,7 @@ def build_pkg(template_pkg, src_dir, out_path, progress=None):
         noffs.append(off); off += (len(name) + 15) & ~15
     entries, sizes = [], []
     for (name, fl), no in zip(items, noffs):
-        p = os.path.join(src_dir, name.decode())
+        p = locate(name.decode())
         if fl & 0xFF == 4:
             entries.append((no, len(name), off, 0, fl)); sizes.append(0); continue
         sz = os.path.getsize(p)
@@ -164,7 +173,7 @@ def build_pkg(template_pkg, src_dir, out_path, progress=None):
         for (name, fl), sz in zip(items, sizes):
             if fl & 0xFF == 4:
                 continue
-            with open(os.path.join(src_dir, name.decode()), 'rb') as f:
+            with open(locate(name.decode()), 'rb') as f:
                 while True:
                     b = f.read(8 << 20)
                     if not b: break

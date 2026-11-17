@@ -8,6 +8,7 @@ import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
+from .ui_common import ClickLabel
 from PySide6.QtWidgets import (QDialog, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
                                QPushButton, QFileDialog, QCheckBox, QLabel, QPlainTextEdit, QProgressBar, QMessageBox)
 
@@ -36,38 +37,54 @@ class ConsoleTab(QWidget):
         super().__init__(); self.dlg, self.console = dlg, console
         fl = QFormLayout(self); fl.setLabelAlignment(Qt.AlignRight)
         self.files = []
-        self.e_files = QLineEdit(); self.e_files.setReadOnly(True)
-        b = QPushButton('اختيار...'); b.setProperty('kind', 'ghost'); b.clicked.connect(self.pick)
-        r = QHBoxLayout(); r.addWidget(self.e_files); r.addWidget(b)
+        self.e_files = ClickLabel('📂 اضغط هنا لاختيار ملف اللعبة، أو اسحبه وأفلته')
+        self.e_files.setStyleSheet('background:#0b0f1f;border:1px dashed #4a5bd6;border-radius:9px;padding:12px;color:#9fb4ff')
+        self.e_files.setCursor(Qt.PointingHandCursor); self.e_files.clicked.connect(self.pick)
+        self.setAcceptDrops(True)
+        r = QHBoxLayout(); r.addWidget(self.e_files)
         hint = 'ملف .cue (أو أكثر للألعاب متعددة الأقراص)' if console == 'PS1' else 'ملف .iso أو .bin/.cue'
         fl.addRow('ملف اللعبة', r); fl.addRow('', QLabel(hint))
         self.e_title = QLineEdit(); fl.addRow('اسم اللعبة', self.e_title)
         self.cover = None
-        self.cover_lbl = QLabel('—'); self.cover_lbl.setFixedSize(120, 120); self.cover_lbl.setAlignment(Qt.AlignCenter)
-        self.cover_lbl.setStyleSheet('background:#0b0f1f;border-radius:8px;')
-        bc = QPushButton('اختيار غلاف'); bc.setProperty('kind', 'ghost'); bc.clicked.connect(self.pick_cover)
-        r2 = QHBoxLayout(); r2.addWidget(self.cover_lbl); r2.addWidget(bc); fl.addRow('الغلاف', r2)
+        self.cover_lbl = ClickLabel('🖼\nاضغط لاختيار\nالغلاف'); self.cover_lbl.setFixedSize(120, 120); self.cover_lbl.setAlignment(Qt.AlignCenter)
+        self.cover_lbl.setStyleSheet('background:#0b0f1f;border:1px dashed #4a5bd6;border-radius:8px;color:#9fb4ff')
+        self.cover_lbl.setCursor(Qt.PointingHandCursor); self.cover_lbl.clicked.connect(self.pick_cover)
+        r2 = QHBoxLayout(); r2.addWidget(self.cover_lbl); r2.addStretch(); fl.addRow('الغلاف', r2)
         self.c_send = QCheckBox('إرسال للجهاز مباشرة' + (' وتثبيتها' if console == 'PS1' else ' (إلى /dev_hdd0/PS2ISO)'))
         self.c_store = QCheckBox('رفعها على archive.org وإضافتها لقسم "%s" في المتجر' % SECTIONS[console][2])
         self.c_send.setChecked(bool(dlg.win.ps3_ip()))
         fl.addRow(self.c_send); fl.addRow(self.c_store)
         go = QPushButton('🎮 تحويل'); go.clicked.connect(self.run); fl.addRow(go)
 
-    def pick(self):
-        flt = 'PS1 (*.cue *.ccd)' if self.console == 'PS1' else 'PS2 (*.iso *.bin *.cue)'
-        fs, _ = QFileDialog.getOpenFileNames(self, 'اختر ملف اللعبة', '', flt)
-        if not fs: return
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls(): e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        fs = [u.toLocalFile() for u in e.mimeData().urls()]
+        imgs = [f for f in fs if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        games = [f for f in fs if f.lower().endswith(('.cue', '.ccd', '.iso', '.bin'))]
+        if imgs: self.set_cover(imgs[0])
+        if games: self.set_files(games)
+
+    def set_files(self, fs):
         self.files = fs if self.console == 'PS1' else fs[:1]
-        self.e_files.setText(' + '.join(os.path.basename(f) for f in self.files))
+        self.e_files.setText('🎮 ' + ' + '.join(os.path.basename(f) for f in self.files))
         if not self.e_title.text():
             t = re.sub(r'\s*[\(\[].*?[\)\]]', '', os.path.splitext(os.path.basename(self.files[0]))[0]).strip()
             self.e_title.setText(t)
 
+    def set_cover(self, f):
+        self.cover = f
+        self.cover_lbl.setPixmap(QPixmap(f).scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def pick(self):
+        flt = 'PS1 (*.cue *.ccd)' if self.console == 'PS1' else 'PS2 (*.iso *.bin *.cue)'
+        fs, _ = QFileDialog.getOpenFileNames(self, 'اختر ملف اللعبة', '', flt)
+        if fs: self.set_files(fs)
+
     def pick_cover(self):
         f, _ = QFileDialog.getOpenFileName(self, 'اختر صورة الغلاف', '', 'Images (*.png *.jpg *.jpeg)')
-        if f:
-            self.cover = f
-            self.cover_lbl.setPixmap(QPixmap(f).scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if f: self.set_cover(f)
 
     def run(self):
         if not self.files:

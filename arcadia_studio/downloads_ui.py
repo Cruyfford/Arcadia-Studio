@@ -5,7 +5,8 @@ import sys
 
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QTableWidget,
+from .ui_common import context_menu, add, shortcut
+from PySide6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QTableWidget,
                                QTableWidgetItem, QHeaderView, QAbstractItemView, QProgressBar, QFileDialog,
                                QInputDialog, QMessageBox)
 
@@ -26,12 +27,10 @@ class DownloadsDialog(QDialog):
         top = QHBoxLayout()
         self.folder = win.settings.value('dl_folder', os.path.join(os.path.expanduser('~'), 'Downloads', 'Arcadia'))
         self.lbl_folder = QLabel('مجلد الحفظ: ' + self.folder)
-        bf = QPushButton('📁 تغيير المجلد'); bf.setProperty('kind', 'ghost'); bf.clicked.connect(self.pick_folder)
         self.conns = QComboBox(); self.conns.addItems(['1', '2', '4', '8', '16']); self.conns.setCurrentText(str(win.settings.value('dl_conns', '8')))
         self.conns.currentTextChanged.connect(lambda t: win.settings.setValue('dl_conns', t))
-        badd = QPushButton('➕ إضافة رابط'); badd.clicked.connect(self.add_url)
-        top.addWidget(self.lbl_folder); top.addStretch(); top.addWidget(bf)
-        top.addWidget(QLabel('عدد الاتصالات:')); top.addWidget(self.conns); top.addWidget(badd)
+        top.addWidget(self.lbl_folder); top.addStretch()
+        top.addWidget(QLabel('عدد الاتصالات:')); top.addWidget(self.conns)
         v.addLayout(top)
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(['اللعبة', 'الحجم', 'التقدم', 'السرعة', 'الحالة'])
@@ -41,14 +40,29 @@ class DownloadsDialog(QDialog):
         self.table.setIconSize(QSize(64, 36)); self.table.verticalHeader().setDefaultSectionSize(44)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         v.addWidget(self.table)
-        bot = QHBoxLayout()
-        for t, fn, kind in [('⏸ إيقاف / ▶ استئناف', self.toggle, 'ghost'), ('✖ إلغاء', self.cancel, 'danger'),
-                            ('📂 فتح المجلد', self.open_folder, 'ghost'), ('📦 عرض محتوى الحزمة', self.view_pkg, 'ghost'), ('📤 إرسال للجهاز', self.send_ps3, '')]:
-            b = QPushButton(t); b.clicked.connect(fn)
-            if kind: b.setProperty('kind', kind)
-            bot.addWidget(b)
-        v.addLayout(bot)
+        hint = QLabel('💡 كلك يمين على الجدول: إضافة رابط، إيقاف/استئناف، إلغاء، عرض المحتوى، إرسال للجهاز — Ctrl+V يضيف الرابط المنسوخ')
+        hint.setStyleSheet('color:#7f8bc0'); v.addWidget(hint)
+        context_menu(self.table, self.menu)
+        shortcut(self, 'Ctrl+V', self.add_url)
+        shortcut(self.table, 'Space', self.toggle)
+        shortcut(self.table, 'Delete', self.cancel)
+        self.table.cellDoubleClicked.connect(lambda r, c: self.view_pkg())
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(500)
+
+    def menu(self, m, pos):
+        it = self.table.itemAt(pos)
+        if it and not self.table.item(it.row(), 0).isSelected(): self.table.selectRow(it.row())
+        add(m, '➕ إضافة رابط تنزيل...', self.add_url, shortcut='Ctrl+V')
+        if self.selected():
+            m.addSeparator()
+            add(m, '⏸ إيقاف / ▶ استئناف', self.toggle, shortcut='Space')
+            add(m, '✖ إلغاء التنزيل', self.cancel, shortcut='Delete')
+            m.addSeparator()
+            add(m, '📦 عرض محتوى الحزمة', self.view_pkg)
+            add(m, '📤 إرسال للجهاز وتثبيت', self.send_ps3)
+        m.addSeparator()
+        add(m, '📂 فتح مجلد التنزيلات', self.open_folder)
+        add(m, '📁 تغيير مجلد الحفظ...', self.pick_folder)
 
     def pick_folder(self):
         d = QFileDialog.getExistingDirectory(self, 'اختر مجلد التنزيلات', self.folder)
@@ -56,7 +70,9 @@ class DownloadsDialog(QDialog):
             self.folder = d; self.win.settings.setValue('dl_folder', d); self.lbl_folder.setText('مجلد الحفظ: ' + d)
 
     def add_url(self):
-        u, ok = QInputDialog.getText(self, 'إضافة رابط', 'الرابط (مباشر أو صفحة MediaFire):')
+        clip = QApplication.clipboard().text().strip()
+        u, ok = QInputDialog.getText(self, 'إضافة رابط', 'الرابط (مباشر أو صفحة MediaFire):',
+                                     text=clip if clip.startswith(('http://', 'https://')) else '')
         if ok and u.strip(): self.add(u.strip(), u.strip().rsplit('/', 1)[-1])
 
     def add(self, url, title, icon_path=None):
@@ -68,7 +84,9 @@ class DownloadsDialog(QDialog):
         self.table.setItem(r, 0, it)
         for c in (1, 3, 4): self.table.setItem(r, c, QTableWidgetItem(''))
         pb = QProgressBar(); pb.setRange(0, 1000); self.table.setCellWidget(r, 2, pb)
-        d.start(); self.show(); self.raise_()
+        d.start()
+        if hasattr(self.win, 'goto'): self.win.goto(self)
+        else: self.show(); self.raise_()
         return d
 
     def refresh(self):

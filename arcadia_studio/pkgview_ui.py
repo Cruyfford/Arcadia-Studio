@@ -5,6 +5,7 @@ import sys
 
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QPixmap
+from .ui_common import context_menu, add, header, shortcut, ClickLabel
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTreeWidget,
                                QTreeWidgetItem, QFileDialog, QMessageBox, QProgressBar, QFormLayout, QWidget,
                                QHeaderView, QSplitter)
@@ -22,48 +23,87 @@ class PkgViewer(QDialog):
         self.setWindowTitle('📦 عارض ومحرر PKG'); self.resize(1300, 820); self.setAcceptDrops(True)
         self.edit_dir = None
         v = QVBoxLayout(self)
-        top = QHBoxLayout()
-        b = QPushButton('📂 فتح ملف PKG'); b.clicked.connect(self.pick)
-        self.lbl = QLabel('افتح ملف PKG أو اسحبه وأفلته هنا'); self.lbl.setStyleSheet('color:#9fb4ff')
-        top.addWidget(b); top.addWidget(self.lbl, 1)
-        v.addLayout(top)
+        self.lbl = QLabel('اسحب ملف PKG وأفلته هنا، أو كلك يمين ← فتح ملف PKG')
+        self.lbl.setStyleSheet('color:#9fb4ff;font-size:15px;padding:4px')
+        v.addWidget(self.lbl)
         sp = QSplitter()
         left = QWidget(); lv = QVBoxLayout(left)
-        self.pic = QLabel(); self.pic.setFixedSize(420, 236); self.pic.setAlignment(Qt.AlignCenter)
+        self.pic = ClickLabel(); self.pic.setFixedSize(420, 236); self.pic.setAlignment(Qt.AlignCenter)
         self.pic.setStyleSheet('background:#0b0f1f;border-radius:12px;')
-        self.icon = QLabel(); self.icon.setFixedSize(320, 176); self.icon.setAlignment(Qt.AlignCenter)
+        self.icon = ClickLabel(); self.icon.setFixedSize(320, 176); self.icon.setAlignment(Qt.AlignCenter)
         self.icon.setStyleSheet('background:#0b0f1f;border-radius:12px;')
+        self.pic.setToolTip('كلك يمين: تغيير الخلفية'); self.icon.setToolTip('كلك يمين: تغيير الأيقونة')
         lv.addWidget(self.pic); lv.addWidget(self.icon, 0, Qt.AlignHCenter)
         self.form = QFormLayout(); self.form.setLabelAlignment(Qt.AlignRight); lv.addLayout(self.form); lv.addStretch()
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(['الملف', 'الحجم', 'النوع'])
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
-        self.tree.itemDoubleClicked.connect(lambda it, c: self.edit_file())
+        self.tree.itemDoubleClicked.connect(lambda it, c: self.need_edit(self.edit_file))
         sp.addWidget(self.tree); sp.addWidget(left); sp.setSizes([800, 460])
         v.addWidget(sp, 1)
         self.prog = QProgressBar(); self.prog.hide(); v.addWidget(self.prog)
-        bot = QHBoxLayout()
-        for t, fn, k in [('✏ تعديل الحزمة', self.start_edit, ''), ('⬇ استخراج الكل', self.extract_all, 'ghost'),
-                         ('⬇ استخراج المحدد', self.extract_sel, 'ghost'), ('📤 إرسال الحزمة للجهاز وتثبيتها', self.send, 'ghost')]:
-            bb = QPushButton(t); bb.clicked.connect(fn)
-            if k: bb.setProperty('kind', k)
-            bot.addWidget(bb)
-        v.addLayout(bot)
-        # edit-mode toolbar (hidden until editing)
-        self.edit_bar = QWidget(); eb = QHBoxLayout(self.edit_bar); eb.setContentsMargins(0, 0, 0, 0)
-        for t, fn, k in [('📝 تعديل الملف', self.edit_file, ''), ('🔢 Hex', lambda: self.edit_file('hex'), 'ghost'),
-                         ('🔓 فك التشفير', self.decrypt_sel, ''), ('🔓 فك تشفير الكل', self.decrypt_all, 'ghost'),
-                         ('🔑 مجلد الرخص RAP', self.pick_rap, 'ghost'),
-                         ('✏ تغيير الاسم', self.edit_title, 'ghost'), ('🖼 تغيير الأيقونة', lambda: self.replace_image('ICON0.PNG', (320, 176)), 'ghost'),
-                         ('🌄 تغيير الخلفية', lambda: self.replace_image('PIC1.PNG', (1920, 1080)), 'ghost'),
-                         ('➕ إضافة / استبدال ملف', self.add_file, 'ghost'), ('🗑 حذف المحدد', self.delete_sel, 'danger'),
-                         ('📂 فتح مجلد التعديل', lambda: self._open(self.edit_dir), 'ghost'), ('🔄 تحديث', self.refresh_edit, 'ghost'),
-                         ('🛠 إعادة البناء إلى PKG', self.rebuild, '')]:
-            bb = QPushButton(t); bb.clicked.connect(fn)
-            if k: bb.setProperty('kind', k)
-            eb.addWidget(bb)
-        self.edit_bar.hide(); v.addWidget(self.edit_bar)
+        hint = QLabel('💡 كل الأدوات في القائمة: كلك يمين على أي ملف (فك التشفير، التعديل، Hex، الاستخراج، إعادة البناء...)')
+        hint.setStyleSheet('color:#7f8bc0;padding:4px'); v.addWidget(hint)
+        context_menu(self.tree, self.tree_menu)
+        context_menu(self.pic, lambda m, p: self.img_menu(m, 'PIC1.PNG', (1920, 1080), '🌄 تغيير الخلفية PIC1'))
+        context_menu(self.icon, lambda m, p: self.img_menu(m, 'ICON0.PNG', (320, 176), '🖼 تغيير الأيقونة ICON0'))
+        self.pic.clicked.connect(lambda: self.need_edit(lambda: self.replace_image('PIC1.PNG', (1920, 1080))) if self.reader else self.pick())
+        self.icon.clicked.connect(lambda: self.need_edit(lambda: self.replace_image('ICON0.PNG', (320, 176))) if self.reader else self.pick())
+        shortcut(self.tree, 'Delete', lambda: self.need_edit(self.delete_sel))
+        shortcut(self.tree, 'Return', lambda: self.need_edit(self.edit_file))
+        shortcut(self, 'Ctrl+O', self.pick)
+        self._after_edit = None
         if path: self.load(path)
+
+    # ---------- right-click menus
+    def tree_menu(self, m, pos):
+        it = self.tree.itemAt(pos)
+        if it and not it.isSelected():
+            self.tree.clearSelection(); it.setSelected(True); self.tree.setCurrentItem(it)
+        add(m, '📂 فتح ملف PKG...', self.pick, shortcut='Ctrl+O')
+        if not self.reader: return
+        sel = self.tree.selectedItems()
+        rel = sel[0].data(0, Qt.UserRole) if sel else ''
+        m.addSeparator()
+        if sel:
+            header(m, '📄 ' + (rel if len(sel) == 1 else '%d عناصر محددة' % len(sel)))
+            add(m, '📝 فتح / تعديل الملف', lambda: self.need_edit(self.edit_file), len(sel) == 1, 'Return')
+            add(m, '🔢 فتح في محرر Hex', lambda: self.need_edit(lambda: self.edit_file('hex')), len(sel) == 1)
+            add(m, '🔓 فك تشفير المحدد', lambda: self.need_edit(self.decrypt_sel))
+            add(m, '⬇ استخراج المحدد...', self.extract_sel)
+            m.addSeparator()
+            add(m, '➕ إضافة / استبدال ملفات هنا...', lambda: self.need_edit(self.add_file))
+            add(m, '🗑 حذف المحدد', lambda: self.need_edit(self.delete_sel), shortcut='Delete')
+            m.addSeparator()
+        add(m, '🔓 فك تشفير كل الحزمة', lambda: self.need_edit(self.decrypt_all))
+        add(m, '🔑 مجلد الرخص RAP...', self.pick_rap)
+        m.addSeparator()
+        sub = m.addMenu('🎨 الاسم والصور')
+        add(sub, '✏ تغيير اسم اللعبة', lambda: self.need_edit(self.edit_title))
+        add(sub, '🖼 تغيير الأيقونة ICON0', lambda: self.need_edit(lambda: self.replace_image('ICON0.PNG', (320, 176))))
+        add(sub, '🌄 تغيير الخلفية PIC1', lambda: self.need_edit(lambda: self.replace_image('PIC1.PNG', (1920, 1080))))
+        add(m, '⬇ استخراج الكل...', self.extract_all)
+        if self.edit_dir:
+            add(m, '📂 فتح مجلد التعديل', lambda: self._open(self.edit_dir))
+            add(m, '🔄 تحديث القائمة', self.refresh_edit)
+        else:
+            add(m, '✏ فك الحزمة للتعديل', self.start_edit)
+        m.addSeparator()
+        add(m, '🛠 إعادة البناء إلى PKG...', lambda: self.need_edit(self.rebuild))
+        add(m, '📤 إرسال الحزمة للجهاز وتثبيتها', self.send)
+
+    def img_menu(self, m, name, size, label):
+        if not self.reader:
+            add(m, '📂 فتح ملف PKG...', self.pick); return
+        add(m, label + '...', lambda: self.need_edit(lambda: self.replace_image(name, size)))
+
+    def need_edit(self, fn):
+        """run fn in edit mode; unpack the package first if needed"""
+        if not self.reader: return
+        if self.edit_dir: return fn()
+        self._after_edit = fn
+        self._keep_sel = {it.data(0, Qt.UserRole) for it in self.tree.selectedItems()}
+        self.start_edit()
 
     # drag & drop
     def dragEnterEvent(self, e):
@@ -83,7 +123,7 @@ class PkgViewer(QDialog):
             r = PkgReader(path); ents = list(r.entries())
         except Exception as e:  # noqa
             QMessageBox.critical(self, 'خطأ', 'تعذّر فتح الحزمة:\n%s' % e); return
-        self.edit_dir = None; self.edit_bar.hide(); self.setWindowTitle('📦 عارض ومحرر PKG')
+        self.edit_dir = None; self._after_edit = None; self.setWindowTitle('📦 عارض ومحرر PKG')
         self.reader, self.ents = r, ents
         self.show_info(r.read_file, r.content_id, r.kind)
         self.fill_tree([(n, ds, fl & 0xFF == 4) for n, do, ds, fl in ents])
@@ -179,9 +219,19 @@ class PkgViewer(QDialog):
         self._run(job, self.enter_edit)
 
     def enter_edit(self, d):
-        self.edit_dir = d; self.edit_bar.show()
+        self.edit_dir = d
         self.setWindowTitle('✏ تعديل: ' + os.path.basename(self.reader.path))
         self.refresh_edit()
+        keep = getattr(self, '_keep_sel', set()); self._keep_sel = set()
+        if keep:
+            from PySide6.QtWidgets import QTreeWidgetItemIterator
+            x = QTreeWidgetItemIterator(self.tree)
+            while x.value():
+                if x.value().data(0, Qt.UserRole) in keep:
+                    x.value().setSelected(True); self.tree.setCurrentItem(x.value())
+                x += 1
+        fn, self._after_edit = self._after_edit, None
+        if fn: fn()
 
     def refresh_edit(self):
         d = self.edit_dir
@@ -208,9 +258,7 @@ class PkgViewer(QDialog):
         its = self.tree.selectedItems()
         if not its: return
         if not self.edit_dir:
-            if QMessageBox.question(self, 'تعديل', 'لتعديل الملفات يجب فك الحزمة أولاً (وضع التعديل). ابدأ الآن؟') == QMessageBox.Yes:
-                self.start_edit()
-            return
+            return self.need_edit(lambda: self.edit_file(force))
         rel = its[0].data(0, Qt.UserRole); p = os.path.join(self.edit_dir, rel)
         if os.path.isdir(p): return
         from .file_editors import open_editor

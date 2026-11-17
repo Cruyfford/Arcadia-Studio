@@ -9,6 +9,7 @@ import queue
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtCore import QSize
+from .ui_common import context_menu, add, header, shortcut
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QProgressBar,
                                QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFileDialog,
                                QMessageBox, QApplication)
@@ -52,20 +53,15 @@ class LinkCheckDialog(QDialog):
         v = QVBoxLayout(self)
         top = QHBoxLayout()
         self.scope = QComboBox(); self.scope.setMinimumWidth(420)
-        self.scope.addItem('🌐 كل المتجر', None)
-        if win.store:
-            for lab, tgt in win.all_sections():
-                self.scope.addItem('📁 ' + lab, tgt)
-        self.b_start = QPushButton('▶ بدء الفحص'); self.b_start.clicked.connect(self.start)
-        self.b_stop = QPushButton('■ إيقاف'); self.b_stop.setProperty('kind', 'ghost'); self.b_stop.clicked.connect(self.stop)
-        self.b_stop.setEnabled(False)
+        self.refresh_scopes()
+        self.running = False
         self.filter = QComboBox(); self.filter.addItems(['عرض الكل', 'المعطلة فقط', 'غير المؤكدة فقط', 'السليمة فقط'])
         self.filter.currentIndexChanged.connect(self.apply_filter)
-        top.addWidget(QLabel('القسم:')); top.addWidget(self.scope); top.addWidget(self.b_start); top.addWidget(self.b_stop)
+        top.addWidget(QLabel('القسم:')); top.addWidget(self.scope)
         top.addStretch(); top.addWidget(QLabel('عرض:')); top.addWidget(self.filter)
         v.addLayout(top)
         self.prog = QProgressBar(); v.addWidget(self.prog)
-        self.summary = QLabel('اضغط "بدء الفحص". الفحص يتم من الكمبيوتر عبر الإنترنت ولا يحتاج الجهاز.')
+        self.summary = QLabel('اختر القسم ثم كلك يمين ← ▶ بدء الفحص (أو F5). الفحص يتم من الكمبيوتر عبر الإنترنت ولا يحتاج الجهاز.')
         v.addWidget(self.summary)
         self.table = QTableWidget(0, 6)
         self.table.setIconSize(QSize(72, 40)); self.table.verticalHeader().setDefaultSectionSize(46)
@@ -79,13 +75,44 @@ class LinkCheckDialog(QDialog):
         self.table.setSortingEnabled(False)
         self.table.cellDoubleClicked.connect(lambda r, c: self.open_url())
         v.addWidget(self.table)
-        bot = QHBoxLayout()
-        for t, fn, kind in [('⬇ تنزيل المحدد', self.download, ''), ('🌐 فتح الرابط', self.open_url, 'ghost'), ('📋 نسخ الرابط', self.copy_url, 'ghost'),
-                            ('💾 تصدير تقرير CSV', self.export, 'ghost'),
-                            ('🗑 حذف العناصر المحددة من المتجر', self.delete_selected, 'danger')]:
-            b = QPushButton(t); b.setProperty('kind', kind); b.clicked.connect(fn); bot.addWidget(b)
-        v.addLayout(bot)
+        context_menu(self.table, self.menu)
+        shortcut(self, 'F5', self.start)
+        shortcut(self.table, 'Delete', self.delete_selected)
+        shortcut(self.table, 'Ctrl+C', self.copy_url)
         self.links, self.rows, self.res, self.th = [], {}, {}, None
+
+    def refresh_scopes(self):
+        cur = self.scope.currentData() if self.scope.count() else None
+        self.scope.clear(); self.scope.addItem('🌐 كل المتجر', None)
+        if self.win.store:
+            for lab, tgt in self.win.all_sections():
+                self.scope.addItem('📁 ' + lab, tgt)
+        i = self.scope.findData(cur)
+        if i >= 0: self.scope.setCurrentIndex(i)
+
+    def set_scope(self, target):
+        self.refresh_scopes()
+        i = self.scope.findData(target)
+        if i >= 0: self.scope.setCurrentIndex(i)
+
+    def menu(self, m, pos):
+        if self.running:
+            add(m, '■ إيقاف الفحص', self.stop)
+        else:
+            add(m, '▶ بدء الفحص — ' + self.scope.currentText(), self.start, shortcut='F5')
+        rows = self.selected()
+        if rows:
+            m.addSeparator(); header(m, '%d لعبة محددة' % len(rows))
+            add(m, '⬇ تنزيل', self.download)
+            add(m, '🌐 فتح الرابط في المتصفح', self.open_url)
+            add(m, '📋 نسخ الرابط', self.copy_url, shortcut='Ctrl+C')
+            add(m, '🗑 حذف من المتجر', self.delete_selected, shortcut='Delete')
+        if self.links:
+            m.addSeparator()
+            sub = m.addMenu('👁 عرض')
+            for i, t in enumerate(['عرض الكل', 'المعطلة فقط', 'غير المؤكدة فقط', 'السليمة فقط']):
+                a = add(sub, t, lambda i=i: self.filter.setCurrentIndex(i)); a.setCheckable(True); a.setChecked(self.filter.currentIndex() == i)
+            add(m, '💾 تصدير تقرير CSV...', self.export)
 
     # ---------- scope
     def scoped_links(self):
@@ -118,6 +145,7 @@ class LinkCheckDialog(QDialog):
 
     # ---------- run
     def start(self):
+        if self.running: return
         if not self.win.store:
             QMessageBox.warning(self, 'تنبيه', 'افتح المتجر أولاً'); return
         links = self.scoped_links()
@@ -139,7 +167,7 @@ class LinkCheckDialog(QDialog):
         self.th = CheckThread(links)
         self.th.finished.connect(self.on_finished)
         self.timer = QTimer(self); self.timer.timeout.connect(self.drain); self.timer.start(400)
-        self.b_start.setEnabled(False); self.b_stop.setEnabled(True)
+        self.running = True
         self.summary.setText('جاري فحص %d رابط فريد (%d عنصر)...' % (len(self.rows), len(links)))
         self.th.start()
 
@@ -186,7 +214,7 @@ class LinkCheckDialog(QDialog):
 
     def on_finished(self):
         self.timer.stop(); self.drain()
-        self.b_start.setEnabled(True); self.b_stop.setEnabled(False); self.update_summary()
+        self.running = False; self.update_summary()
         self.summary.setText(self.summary.text() + '   ✔ انتهى الفحص')
 
     def apply_filter(self):
