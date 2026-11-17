@@ -43,7 +43,7 @@ def collect_links(store, rel_files=None):
                 pairs = dict(_pair_re.findall(tb))
                 url = extract_url(pairs)
                 if url:
-                    out.append(dict(file=rel, view=vid, key=key, url=url,
+                    out.append(dict(file=rel, view=vid, key=key, url=url, icon=html.unescape(pairs.get('icon', '')),
                                     title=store.display(html.unescape(pairs.get('title', key)))))
     return out
 
@@ -130,3 +130,14 @@ def human(n):
         if n < 1024 or unit == 'GB':
             return ('%.1f %s' % (n, unit)) if unit != 'B' else '%d B' % n
         n /= 1024.0
+
+
+def proc_main(links, out, stop):
+    """entry point for the separate checker process"""
+    class _Ev:
+        def is_set(self): return stop.is_set()
+    try:
+        check_all(links, progress=lambda a, b: out.put(('p', a, b)),
+                  on_result=lambda u, r: out.put(('r', u, r)), cancel=_Ev())
+    finally:
+        out.put(None)

@@ -24,6 +24,7 @@ jobs:
           --hidden-import Crypto.Cipher.AES --hidden-import Crypto.Hash.CMAC
           --hidden-import ecdsa --hidden-import pycdlib --hidden-import requests --hidden-import PIL
           --collect-submodules bidi --collect-data arabic_reshaper
+          --icon arcadia_studio/assets/arcadia.ico
           run_studio.py
       - uses: actions/upload-artifact@v4
         with:

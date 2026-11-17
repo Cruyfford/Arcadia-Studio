@@ -139,7 +139,7 @@ class Main(QMainWindow):
                          ('🛠 بناء PKG', self.build), ('⚡ تحديث سريع للجهاز', self.quick_sync),
                          ('📤 إرسال PKG للجهاز', self.send_pkg_pick), ('📡 إعداد PS3', self.ps3_setup),
                          ('🌍 نشر للجميع', self.publish), ('🔑 إعداد النشر', self.publish_setup),
-                         ('🎮 محوّل الألعاب', self.open_converter), ('🔗 فحص الروابط', self.open_linkcheck), ('🧾 تصدير JSON', self.export_json)]:
+                         ('🎮 محوّل الألعاب', self.open_converter), ('🔗 فحص الروابط', self.open_linkcheck), ('⬇ التنزيلات', lambda: self.downloads().show()), ('🧾 تصدير JSON', self.export_json)]:
             a = QAction(text, self); a.triggered.connect(fn); tb.addAction(a)
 
         self.tree = QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setIconSize(QSize(46, 26))
@@ -163,7 +163,7 @@ class Main(QMainWindow):
         fl.addRow(b_apply)
 
         acts = QHBoxLayout()
-        for t, fn, kind in [('➕ لعبة', self.add_game, ''), ('📁 قسم جديد', self.add_section, ''), ('▲', lambda: self.move(-1), 'ghost'),
+        for t, fn, kind in [('⬇ تنزيل', self.download_current, ''), ('➕ لعبة', self.add_game, ''), ('📁 قسم جديد', self.add_section, ''), ('▲', lambda: self.move(-1), 'ghost'),
                             ('▼', lambda: self.move(1), 'ghost'), ('🗑 حذف', self.delete, 'danger')]:
             b = QPushButton(t); b.clicked.connect(fn)
             if kind: b.setProperty('kind', kind)
@@ -463,7 +463,23 @@ class Main(QMainWindow):
 
     def open_linkcheck(self):
         from arcadia_studio.linkcheck_ui import LinkCheckDialog
-        self.lc = LinkCheckDialog(self); self.lc.show()
+        self.lc = LinkCheckDialog(self); self.lc.showMaximized()
+
+    def downloads(self):
+        if not getattr(self, 'dm', None):
+            from arcadia_studio.downloads_ui import DownloadsDialog
+            self.dm = DownloadsDialog(self)
+        return self.dm
+
+    def download_current(self):
+        n = self.cur
+        if not n: return
+        from arcadia_studio.core.linkcheck import extract_url
+        url = extract_url(n['pairs'])
+        if not url:
+            QMessageBox.information(self, 'تنزيل', 'هذا العنصر لا يحتوي على رابط تنزيل'); return
+        ic = n['pairs'].get('icon')
+        self.downloads().add(url, self.store.display(n['pairs'].get('title', n['key'])), self.store.abs_path(ic) if ic else None)
 
     def open_converter(self):
         from arcadia_studio.converter import ConverterDialog
@@ -591,7 +607,9 @@ def main():
     app = QApplication(sys.argv)
     app.setLayoutDirection(Qt.RightToLeft)
     app.setStyleSheet(STYLE)
-    w = Main(); w.show()
+    ico = os.path.join(ASSETS, 'arcadia.ico')
+    if os.path.exists(ico): app.setWindowIcon(QIcon(ico))
+    w = Main(); w.showMaximized()
     sys.exit(app.exec())
 
 

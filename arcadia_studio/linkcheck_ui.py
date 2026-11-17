@@ -3,28 +3,46 @@ import csv
 import threading
 import webbrowser
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor
+import multiprocessing as mp
+import queue
+
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QColor, QIcon
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QProgressBar,
                                QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFileDialog,
                                QMessageBox, QApplication)
 
-from .core.linkcheck import collect_links, check_all, human, OK, BROKEN, UNSURE
+from .core.linkcheck import collect_links, check_all, human, proc_main as _proc_main, OK, BROKEN, UNSURE
 
 ICON = {OK: '✅ يعمل', BROKEN: '❌ معطل', UNSURE: '⚠️ غير مؤكد', None: '⏳'}
 COLOR = {OK: '#123d2a', BROKEN: '#4a1420', UNSURE: '#4a3a10'}
 
 
 class CheckThread(QThread):
-    result = Signal(str, object)
-    progress = Signal(int, int)
-
     def __init__(self, links):
         super().__init__(); self.links = links; self.cancel = threading.Event()
+        self.q = queue.Queue(); self.done = 0; self.total = 1
 
     def run(self):
-        check_all(self.links, progress=lambda a, b: self.progress.emit(a, b),
-                  on_result=lambda u, r: self.result.emit(u, r), cancel=self.cancel)
+        # checks run in a separate process so the window never freezes (no GIL contention)
+        ctx = mp.get_context('spawn')
+        out, stop = ctx.Queue(), ctx.Event()
+        p = ctx.Process(target=_proc_main, args=(self.links, out, stop), daemon=True)
+        p.start()
+        while True:
+            if self.cancel.is_set(): stop.set()
+            try:
+                msg = out.get(timeout=0.3)
+            except queue.Empty:
+                if not p.is_alive(): break
+                continue
+            if msg is None: break
+            kind, a, b = msg
+            if kind == 'r': self.q.put((a, b))
+            else: self.done, self.total = a, b
+        p.join(2)
+
 
 
 class LinkCheckDialog(QDialog):
@@ -33,19 +51,24 @@ class LinkCheckDialog(QDialog):
         self.setWindowTitle('🔗 فحص الروابط'); self.resize(1250, 720)
         v = QVBoxLayout(self)
         top = QHBoxLayout()
-        self.scope = QComboBox(); self.scope.addItems(['كل المتجر', 'القسم المحدد في الشجرة فقط'])
+        self.scope = QComboBox(); self.scope.setMinimumWidth(420)
+        self.scope.addItem('🌐 كل المتجر', None)
+        if win.store:
+            for lab, tgt in win.all_sections():
+                self.scope.addItem('📁 ' + lab, tgt)
         self.b_start = QPushButton('▶ بدء الفحص'); self.b_start.clicked.connect(self.start)
         self.b_stop = QPushButton('■ إيقاف'); self.b_stop.setProperty('kind', 'ghost'); self.b_stop.clicked.connect(self.stop)
         self.b_stop.setEnabled(False)
         self.filter = QComboBox(); self.filter.addItems(['عرض الكل', 'المعطلة فقط', 'غير المؤكدة فقط', 'السليمة فقط'])
         self.filter.currentIndexChanged.connect(self.apply_filter)
-        top.addWidget(QLabel('النطاق:')); top.addWidget(self.scope); top.addWidget(self.b_start); top.addWidget(self.b_stop)
+        top.addWidget(QLabel('القسم:')); top.addWidget(self.scope); top.addWidget(self.b_start); top.addWidget(self.b_stop)
         top.addStretch(); top.addWidget(QLabel('عرض:')); top.addWidget(self.filter)
         v.addLayout(top)
         self.prog = QProgressBar(); v.addWidget(self.prog)
         self.summary = QLabel('اضغط "بدء الفحص". الفحص يتم من الكمبيوتر عبر الإنترنت ولا يحتاج الجهاز.')
         v.addWidget(self.summary)
         self.table = QTableWidget(0, 6)
+        self.table.setIconSize(QSize(72, 40)); self.table.verticalHeader().setDefaultSectionSize(46)
         self.table.setHorizontalHeaderLabels(['الحالة', 'العنوان', 'الحجم', 'ملاحظة', 'الرابط', 'المكان'])
         hh = self.table.horizontalHeader()
         for i, m in enumerate([QHeaderView.ResizeToContents, QHeaderView.Stretch, QHeaderView.ResizeToContents,
@@ -57,7 +80,7 @@ class LinkCheckDialog(QDialog):
         self.table.cellDoubleClicked.connect(lambda r, c: self.open_url())
         v.addWidget(self.table)
         bot = QHBoxLayout()
-        for t, fn, kind in [('🌐 فتح الرابط', self.open_url, 'ghost'), ('📋 نسخ الرابط', self.copy_url, 'ghost'),
+        for t, fn, kind in [('⬇ تنزيل المحدد', self.download, ''), ('🌐 فتح الرابط', self.open_url, 'ghost'), ('📋 نسخ الرابط', self.copy_url, 'ghost'),
                             ('💾 تصدير تقرير CSV', self.export, 'ghost'),
                             ('🗑 حذف العناصر المحددة من المتجر', self.delete_selected, 'danger')]:
             b = QPushButton(t); b.setProperty('kind', kind); b.clicked.connect(fn); bot.addWidget(b)
@@ -66,21 +89,32 @@ class LinkCheckDialog(QDialog):
 
     # ---------- scope
     def scoped_links(self):
+        """walk the menu tree from the chosen section; game pages get their cover from the list entry"""
+        from .core.xmb import ROOT_XML, ROOT_VIEW
         s = self.win.store
-        if self.scope.currentIndex() == 0:
-            return collect_links(s)
-        it = self.win.tree.currentItem()
-        n = it.data(0, Qt.UserRole) if it else None
-        if not n or not n['target']:
-            QMessageBox.information(self, 'تنبيه', 'حدد قسماً (مجلداً) في الشجرة أولاً'); return None
-        views, stack, files = set(), [n['target']], set()
-        while stack and len(views) < 3000:
+        tgt = self.scope.currentData()
+        whole = tgt is None
+        if whole:
+            tgt = s.children(ROOT_XML, ROOT_VIEW)[0]['target']
+        parent_icon = {tgt: None}
+        stack, seen, files = [tgt], set(), set()
+        while stack and len(seen) < 60000:
             tg = stack.pop()
-            if tg in views: continue
-            views.add(tg); files.add(tg[0])
+            if tg in seen: continue
+            seen.add(tg); files.add(tg[0])
             for c in s.children(*tg):
-                if c['target']: stack.append(c['target'])
-        return [l for l in collect_links(s, list(files)) if (l['file'], l['view']) in views]
+                if c['target'] and c['target'] not in parent_icon:
+                    ic = c['pairs'].get('icon', '')
+                    parent_icon[c['target']] = ic if (ic and not c['target'][0].startswith('USRDIR/PS3/XML/')) or not parent_icon.get(tg) else parent_icon[tg]
+                    stack.append(c['target'])
+        out = []
+        for l in collect_links(s, None if whole else list(files)):
+            key = (l['file'], l['view'])
+            if key not in seen and not whole: continue
+            if l['file'].startswith('USRDIR/PS3/XML/') and parent_icon.get(key):
+                l['icon'] = parent_icon[key]
+            out.append(l)
+        return out
 
     # ---------- run
     def start(self):
@@ -91,16 +125,20 @@ class LinkCheckDialog(QDialog):
         if not links:
             QMessageBox.information(self, 'فحص الروابط', 'لا توجد روابط تنزيل في هذا النطاق'); return
         self.links, self.res, self.rows = links, {}, {}
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(0); self.table.setRowCount(len(links))
         for i, l in enumerate(links):
             for c, val in enumerate([ICON[None], l['title'], '', '', l['url'], '%s › %s' % (l['file'].replace('USRDIR/', ''), l['view'])]):
                 self.table.setItem(i, c, QTableWidgetItem(val))
+            ic = self.icon_for(l.get('icon'))
+            if ic: self.table.item(i, 1).setIcon(ic)
             self.rows.setdefault(l['url'], []).append(i)
+        self.table.setUpdatesEnabled(True)
         self.prog.setValue(0)
+        self.cnt = {OK: 0, BROKEN: 0, UNSURE: 0}
         self.th = CheckThread(links)
-        self.th.result.connect(self.on_result)
-        self.th.progress.connect(lambda a, b: (self.prog.setMaximum(b), self.prog.setValue(a), self.update_summary()))
         self.th.finished.connect(self.on_finished)
+        self.timer = QTimer(self); self.timer.timeout.connect(self.drain); self.timer.start(400)
         self.b_start.setEnabled(False); self.b_stop.setEnabled(True)
         self.summary.setText('جاري فحص %d رابط فريد (%d عنصر)...' % (len(self.rows), len(links)))
         self.th.start()
@@ -108,16 +146,31 @@ class LinkCheckDialog(QDialog):
     def stop(self):
         if self.th: self.th.cancel.set()
 
+    def drain(self):
+        """apply queued results in one batch (keeps the window responsive)"""
+        batch = []
+        try:
+            while len(batch) < 2000: batch.append(self.th.q.get_nowait())
+        except queue.Empty:
+            pass
+        if batch:
+            self.table.setUpdatesEnabled(False)
+            for u, r in batch: self.on_result(u, r)
+            self.table.setUpdatesEnabled(True)
+            if self.filter.currentIndex(): self.apply_filter()
+        self.prog.setMaximum(max(self.th.total, 1)); self.prog.setValue(self.th.done)
+        self.update_summary()
+
     def on_result(self, url, r):
         self.res[url] = r
         st, code, size, note = r
+        self.cnt[st] += len(self.rows.get(url, []))
         for i in self.rows.get(url, []):
             self.table.item(i, 0).setText(ICON[st])
             self.table.item(i, 2).setText(human(size))
             self.table.item(i, 3).setText(note or (str(code) if code else ''))
             for c in range(6):
                 self.table.item(i, c).setBackground(QColor(COLOR[st]))
-        if self.filter.currentIndex(): self.apply_filter()
 
     def counts(self):
         c = {OK: 0, BROKEN: 0, UNSURE: 0}
@@ -127,11 +180,12 @@ class LinkCheckDialog(QDialog):
         return c
 
     def update_summary(self):
-        c = self.counts()
+        c = getattr(self, 'cnt', None) or self.counts()
         self.summary.setText('✅ يعمل: %d    ❌ معطل: %d    ⚠️ غير مؤكد: %d    — من %d عنصر'
                              % (c[OK], c[BROKEN], c[UNSURE], len(self.links)))
 
     def on_finished(self):
+        self.timer.stop(); self.drain()
         self.b_start.setEnabled(True); self.b_stop.setEnabled(False); self.update_summary()
         self.summary.setText(self.summary.text() + '   ✔ انتهى الفحص')
 
@@ -140,6 +194,23 @@ class LinkCheckDialog(QDialog):
         for i, l in enumerate(self.links):
             r = self.res.get(l['url'])
             self.table.setRowHidden(i, bool(want) and (not r or r[0] != want))
+
+    def icon_for(self, ps3path):
+        if not ps3path: return None
+        cache = self.__dict__.setdefault('_icons', {})
+        if ps3path not in cache:
+            p = self.win.store.abs_path(ps3path)
+            cache[ps3path] = QIcon(p) if p and __import__('os').path.exists(p) else None
+        return cache[ps3path]
+
+    def download(self):
+        rows = self.selected()
+        if not rows:
+            QMessageBox.information(self, 'تنبيه', 'حدد لعبة أو أكثر من الجدول'); return
+        dm = self.win.downloads()
+        for r in rows:
+            l = self.links[r]
+            dm.add(l['url'], l['title'], self.win.store.abs_path(l.get('icon', '')) if l.get('icon') else None)
 
     # ---------- actions
     def selected(self):
@@ -172,5 +243,6 @@ class LinkCheckDialog(QDialog):
             self.table.removeRow(r); del self.links[r]
         self.rows = {}
         for i, l in enumerate(self.links): self.rows.setdefault(l['url'], []).append(i)
+        self.cnt = self.counts()
         self.win.rebuild_tree(); self.update_summary()
         self.win.statusBar().showMessage('تم الحذف — احفظ ثم انشر')
