@@ -177,6 +177,7 @@ class DevicePage(QWidget):
         add(m, '🔌 اختبار الاتصال بالجهاز', self.test_ip)
         add(m, '⚡ إرسال التعديلات للجهاز (تحديث سريع)', self.win.quick_sync, shortcut='F6')
         add(m, '📤 إرسال حزمة PKG للجهاز...', self.win.send_pkg_pick)
+        add(m, '🔑 استخراج رخص ألعابي (RAP)...', self.win.open_licenses)
         m.addSeparator()
         add(m, '🌍 نشر تحديث للجميع', self.win.publish, shortcut='F7')
         m.addSeparator()
@@ -321,6 +322,8 @@ class Main(QMainWindow):
         add(m, '⚡ إرسال التعديلات للجهاز (تحديث سريع)', self.quick_sync, shortcut='F6')
         add(m, '📤 إرسال حزمة PKG للجهاز وتثبيتها...', self.send_pkg_pick)
         add(m, '📡 إعداد الاتصال بالجهاز...', self.ps3_setup)
+        m.addSeparator()
+        add(m, '🔑 استخراج رخص ألعابي (RAP) من الجهاز...', self.open_licenses)
         m = mb.addMenu('النشر')
         add(m, '🌍 نشر تحديث للجميع', self.publish, shortcut='F7')
         add(m, '🔑 إعداد النشر (archive.org)...', self.publish_setup)
@@ -834,6 +837,10 @@ class Main(QMainWindow):
         ic = n['pairs'].get('icon')
         self.downloads().add(url, self.store.display(n['pairs'].get('title', n['key'])), self.store.abs_path(ic) if ic else None)
         self.goto(self.dm)
+
+    def open_licenses(self):
+        from arcadia_studio.licenses_ui import LicensesDialog
+        self.licd = LicensesDialog(self); self.licd.show()
 
     def open_converter(self):
         self.goto(self.conv)

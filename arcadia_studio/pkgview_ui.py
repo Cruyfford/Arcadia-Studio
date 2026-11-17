@@ -77,6 +77,7 @@ class PkgViewer(QDialog):
             m.addSeparator()
         add(m, '🔓 فك تشفير كل الحزمة', lambda: self.need_edit(self.decrypt_all))
         add(m, '🔑 مجلد الرخص RAP...', self.pick_rap)
+        add(m, '🔑 استخراج رخص ألعابي من الجهاز...', self.win.open_licenses)
         m.addSeparator()
         sub = m.addMenu('🎨 الاسم والصور')
         add(sub, '✏ تغيير اسم اللعبة', lambda: self.need_edit(self.edit_title))
@@ -291,9 +292,9 @@ class PkgViewer(QDialog):
             for i, p in enumerate(paths):
                 try:
                     out, how, n = decrypt_file(p, rap_dirs=dirs)
-                    ok.append('✅ %s ← %s (%s)' % (os.path.relpath(out, self.edit_dir), os.path.basename(p), how))
+                    ok.append('\u200f✅ \u200e%s\u200f ← \u200e%s\u200f (%s)' % (os.path.relpath(out, self.edit_dir), os.path.basename(p), how))
                 except Exception as e:  # noqa
-                    bad.append('❌ %s: %s' % (os.path.basename(p), e))
+                    bad.append('\u200f❌ \u200e%s\u200f: %s' % (os.path.basename(p), e))
                 prog(i + 1, len(paths))
             return ok, bad
 
@@ -301,7 +302,9 @@ class PkgViewer(QDialog):
             ok, bad = r
             self.refresh_edit()
             msg = '\n'.join(ok + bad)
-            msg += '\n\nالملفات المفكوكة تُحفظ بجانب الأصلية (EBOOT.elf، .prx، أو بدون .edat).'
+            msg += '\n\n\u200fالملفات المفكوكة تُحفظ بجانب الأصلية.'
+            if bad and any('.rap' in b for b in bad):
+                msg += '\n\n\u200f🔑 لو اللعبة مشتراة على حسابك: كلك يمين ← «استخراج رخص ألعابي من الجهاز» ثم أعد فك التشفير.'
             (QMessageBox.warning if bad and not ok else QMessageBox.information)(self, 'فك التشفير', msg[:3500])
         self._run(job, done)
 
