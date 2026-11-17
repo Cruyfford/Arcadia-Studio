@@ -289,3 +289,15 @@ def psl1ght_pack(folder, contentid, out_path):
         if carry: o.write(crypt(qa, carry, blk))
         o.write(b'\0' * 0x60)
     return n, os.path.getsize(out_path)
+
+
+def rebuild_pkg(original_pkg, folder, out_path, progress=None):
+    """repack an edited folder. Keeps the original header/metadata when its layout is the standard
+    debug one; otherwise (retail or other layouts) builds a PSL1GHT-style debug PKG with the same
+    content id. Result installs on HEN/CFW."""
+    r = PkgReader(original_pkg)
+    meta_off, meta_cnt, meta_size = struct.unpack('>III', r.header[8:20])
+    if not r.retail and r.data_off == 0x180 and meta_off == 0xC0 and meta_size == 0xC0:
+        return build_pkg(original_pkg, folder, out_path, progress) + ('template',)
+    n, size = psl1ght_pack(folder, r.content_id, out_path)
+    return n, size, 'psl1ght'

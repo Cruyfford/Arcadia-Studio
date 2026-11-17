@@ -23,3 +23,18 @@ def parse_sfo(data):
         else:
             out[key] = raw.rstrip(b'\0').decode('utf-8', 'replace')
     return out
+
+
+def set_sfo_string(data, key, value):
+    """returns new PARAM.SFO bytes with a utf-8 string value replaced (within the field's max length)"""
+    data = bytearray(data)
+    _, _, kt, dt, n = struct.unpack('<IIIII', data[:20])
+    for i in range(n):
+        e = 20 + i * 16
+        ko, fmt, ln, mx, do = struct.unpack('<HHIII', data[e:e + 16])
+        if data[kt + ko:data.index(b'\0', kt + ko)].decode() != key: continue
+        raw = value.encode('utf-8')[:mx - 1] + b'\0'
+        data[dt + do:dt + do + mx] = raw + b'\0' * (mx - len(raw))
+        struct.pack_into('<I', data, e + 4, len(raw))
+        return bytes(data)
+    raise KeyError(key)
