@@ -195,3 +195,61 @@ class XmbDialog(QDialog):
         note = QLabel('  ←→↑↓ تنقّل • Enter = ✕ دخول • Backspace = ◯ رجوع • Esc إغلاق   |   النصوص تظهر بنفس الشكل المخزّن للجهاز — لو ظهر حرف مقطّع أو معكوس هنا فسيظهر كذلك على الجهاز.')
         note.setStyleSheet('color:#7f8bc0;padding:4px'); v.addWidget(note)
         self.view.setFocus()
+
+
+class GamePreview(QWidget):
+    """how one game PKG looks on the XMB when selected: PIC1 background, ICON0, title (+ SND0 music)"""
+    def __init__(self, win, read, sfo):
+        super().__init__(); self.win = win; self.t0 = time.time(); self.setMinimumSize(640, 360)
+        self.pic, self.icon = QPixmap(), QPixmap()
+        for pm, name in ((self.pic, 'PIC1.PNG'), (self.icon, 'ICON0.PNG')):
+            d = read(name)
+            if d: pm.loadFromData(d)
+        if self.pic.isNull():
+            d = read('PIC0.PNG')
+            if d: self.pic.loadFromData(d)
+        self.title = str(sfo.get('TITLE', '')).replace('\n', ' ')
+        self.sub = '  '.join(x for x in (str(sfo.get('TITLE_ID', '')), ('v' + str(sfo.get('APP_VER'))) if sfo.get('APP_VER') else '') if x)
+        self.anim = QTimer(self); self.anim.timeout.connect(self.update); self.anim.start(50)
+
+    def paintEvent(self, ev):
+        qp = QPainter(self); qp.setRenderHint(QPainter.Antialiasing); qp.setRenderHint(QPainter.SmoothPixmapTransform)
+        sc = min(self.width() / W, self.height() / H)
+        qp.fillRect(self.rect(), QColor('#000'))
+        qp.translate((self.width() - W * sc) / 2, (self.height() - H * sc) / 2); qp.scale(sc, sc)
+        if self.pic.isNull():
+            XmbView.wave(self, qp)
+        else:
+            qp.drawPixmap(QRectF(0, 0, W, H), self.pic, QRectF(self.pic.rect()))
+        qp.setFont(QFont(self.win.ui_font, 18)); qp.setPen(QColor('#fff'))
+        qp.drawText(W - 230, 52, time.strftime('%d/%m  %H:%M'))
+        if not self.icon.isNull():
+            pm = self.icon.scaled(320, 176, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            qp.drawPixmap(300 - pm.width() // 2, 300, pm)
+        f = QFont(self.win.ui_font, 24); f.setBold(True); qp.setFont(f)
+        qp.setPen(QColor(0, 0, 0, 120)); qp.drawText(482, 392, self.title)
+        qp.setPen(QColor('#fff')); qp.drawText(480, 390, self.title)
+        qp.setFont(QFont(self.win.ui_font, 15)); qp.setPen(QColor('#d6e0ff')); qp.drawText(480, 424, self.sub)
+
+
+class GamePreviewDialog(QDialog):
+    def __init__(self, win, read, sfo):
+        super().__init__(win); self.setWindowTitle('📺 معاينة اللعبة في الجهاز'); self.resize(1280, 760)
+        v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(GamePreview(win, read, sfo), 1)
+        self.note = QLabel(); self.note.setStyleSheet('color:#7f8bc0;padding:4px'); v.addWidget(self.note)
+        self.player = None
+        snd = read('SND0.AT3')
+        if snd:
+            try:
+                from .core.audio import to_wav, Player
+                self.player = Player(self); self.player.play(to_wav(snd))
+                self.note.setText('  🔊 يعمل صوت SND0 الخاص باللعبة (كما يُسمع عند الوقوف عليها في الجهاز)')
+            except Exception as e:  # noqa
+                self.note.setText('  🔇 تعذّر تشغيل الصوت: %s' % e)
+        else:
+            self.note.setText('  🔇 هذه الحزمة لا تحتوي صوت SND0.AT3')
+
+    def closeEvent(self, e):
+        if self.player: self.player.stop()
+        super().closeEvent(e)

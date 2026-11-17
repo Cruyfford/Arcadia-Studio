@@ -63,56 +63,6 @@ def rap_to_rif(rap):
     return bytes(key)
 
 
-def rif_to_rap(rif_key):
-    """inverse of rap_to_rif: rif key (16 bytes) -> .rap file contents"""
-    key = bytearray(rif_key[:16])
-    pbox, e1, e2 = K.RAP_PBOX, K.RAP_E1, K.RAP_E2
-    for _ in range(5):
-        c = 0                                   # undo the borrow-chain subtraction (add with carry)
-        for i in range(16):
-            p = pbox[i]
-            t = key[p] + e2[p] + c
-            key[p] = t & 0xFF; c = t >> 8
-        for i in range(1, 16):                  # undo the xor chain
-            p, pp = pbox[i], pbox[i - 1]; key[p] ^= key[pp]
-        for i in range(16):
-            p = pbox[i]; key[p] ^= e1[p]
-    return AES.new(K.RAP_KEY, AES.MODE_ECB).encrypt(bytes(key))
-
-
-def _ecb_dec(key, block):
-    return AES.new(key, AES.MODE_ECB).decrypt(block)
-
-
-def parse_idps(text_or_bytes):
-    """IDPS from hex text ('00000001008...') or a dump file's bytes"""
-    if isinstance(text_or_bytes, (bytes, bytearray)):
-        b = bytes(text_or_bytes)
-        if len(b) >= 32 and all(c in b'0123456789abcdefABCDEF \r\n' for c in b[:40]):
-            return parse_idps(b.decode('ascii', 'ignore'))
-        if len(b) < 16: raise ValueError('ملف IDPS قصير')
-        return b[:16]
-    h = ''.join(ch for ch in text_or_bytes if ch in '0123456789abcdefABCDEF')
-    if len(h) != 32: raise ValueError('رقم IDPS لازم يكون 32 خانة hex (16 بايت)')
-    return bytes.fromhex(h)
-
-
-def parse_rif(data):
-    if len(data) < 0x60: raise ValueError('ملف rif غير صالح')
-    cid = data[0x10:0x40].split(b'\0')[0].decode('ascii', 'replace')
-    return {'account_id': data[8:16], 'content_id': cid, 'enc_index': data[0x40:0x50], 'enc_key': data[0x50:0x60]}
-
-
-def rif_key_from(rif_data, act_dat, idps):
-    """own license -> rif key, using this console's act.dat and IDPS (same as the PS3 does)"""
-    r = parse_rif(rif_data)
-    idx = struct.unpack('>I', _ecb_dec(K.NP_RIF_KEY, r['enc_index'])[12:16])[0]
-    if idx >= 128: raise ValueError('فهرس مفتاح غير صالح (%d)' % idx)
-    idps_key = AES.new(idps[:16], AES.MODE_ECB).encrypt(K.NP_IDPS)
-    act_key = _ecb_dec(idps_key, act_dat[0x10 + idx * 16:0x20 + idx * 16])
-    return r['content_id'], _ecb_dec(act_key, r['enc_key']), r
-
-
 def find_rap(content_id, rap_dirs):
     for d in rap_dirs or []:
         if not d or not os.path.isdir(d): continue

@@ -68,6 +68,8 @@ class PkgViewer(QDialog):
         if sel:
             header(m, '📄 ' + (rel if len(sel) == 1 else '%d عناصر محددة' % len(sel)))
             add(m, '📝 فتح / تعديل الملف', lambda: self.need_edit(self.edit_file), len(sel) == 1, 'Return')
+            if len(sel) == 1 and rel.lower().endswith('.at3'):
+                add(m, '🔊 تشغيل الصوت', lambda: self.play_at3(rel))
             add(m, '🔢 فتح في محرر Hex', lambda: self.need_edit(lambda: self.edit_file('hex')), len(sel) == 1)
             add(m, '🔓 فك تشفير المحدد', lambda: self.need_edit(self.decrypt_sel))
             sub = m.addMenu('🔤 أدوات التعريب')
@@ -84,6 +86,7 @@ class PkgViewer(QDialog):
         m.addSeparator()
         sub = m.addMenu('🎨 الاسم والصور')
         add(sub, '✏ تغيير اسم اللعبة', lambda: self.need_edit(self.edit_title))
+        add(m, '📺 معاينة اللعبة في الجهاز (مع صوت SND0)', self.game_preview)
         add(sub, '🖼 تغيير الأيقونة ICON0', lambda: self.need_edit(lambda: self.replace_image('ICON0.PNG', (320, 176))))
         add(sub, '🌄 تغيير الخلفية PIC1', lambda: self.need_edit(lambda: self.replace_image('PIC1.PNG', (1920, 1080))))
         add(m, '⬇ استخراج الكل...', self.extract_all)
@@ -268,6 +271,31 @@ class PkgViewer(QDialog):
         from .file_editors import open_editor
         dlg = open_editor(self, p, force)
         if dlg: dlg.finished.connect(lambda *_: self.refresh_edit())
+
+    # ---------- look & sound
+    def _reader_fn(self):
+        if self.edit_dir:
+            def read(name):
+                p = os.path.join(self.edit_dir, name)
+                return open(p, 'rb').read() if os.path.isfile(p) else None
+            return read
+        return self.reader.read_file
+
+    def game_preview(self):
+        if not self.reader: return
+        from .xmb_ui import GamePreviewDialog
+        read = self._reader_fn()
+        self.gpd = GamePreviewDialog(self.win, read, parse_sfo(read('PARAM.SFO') or b'')); self.gpd.show()
+
+    def play_at3(self, rel):
+        from .core.audio import to_wav, Player
+        try:
+            data = self._reader_fn()(rel)
+            if not hasattr(self, 'player'): self.player = Player(self)
+            if self.player.playing(): self.player.stop(); return
+            self.player.play(to_wav(data), loop=False)
+        except Exception as e:  # noqa
+            QMessageBox.warning(self, 'الصوت', str(e))
 
     # ---------- Arabization tools
     def _sel_file(self):

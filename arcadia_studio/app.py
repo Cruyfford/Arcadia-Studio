@@ -104,6 +104,15 @@ class Preview(QWidget):
         p = self.win.store.abs_path(ps3path) if (self.win.store and ps3path) else None
         return QPixmap(p) if p and os.path.exists(p) else QPixmap()
 
+    @staticmethod
+    def _text(qp, x, y, t):
+        """mixed Arabic/English titles: paragraph direction from the first strong letter (like the PS3 text)"""
+        import unicodedata as _u
+        rtl = next((_u.bidirectional(c) in ('R', 'AL') for c in t if _u.bidirectional(c) in ('L', 'R', 'AL')), False)
+        if rtl: t = '\u202b' + t + '\u202c'       # right-to-left embedding: keeps "اللعبة ج1 - GTA V" in the right order
+        qp.setLayoutDirection(Qt.LeftToRight)
+        qp.drawText(x, y, t)
+
     def paintEvent(self, ev):
         qp = QPainter(self); qp.setRenderHint(QPainter.Antialiasing); qp.setRenderHint(QPainter.SmoothPixmapTransform)
         r = self.rect()
@@ -130,11 +139,10 @@ class Preview(QWidget):
                 qp.drawPixmap(x_icon - pm.width() // 2, y, pm)
             f = QFont(self.win.ui_font, max(7, int((34 if big else 30) * s)))
             qp.setFont(f); qp.setPen(QColor(255, 255, 255, 255 if big else 200))
-            qp.setLayoutDirection(Qt.LeftToRight)
-            qp.drawText(x_text, y + int(h * .5), self.win.store.display(n['pairs'].get('title', n['key'])))
+            self._text(qp, x_text, y + int(h * .5), self.win.store.display(n['pairs'].get('title', n['key'])))
             if big and n['pairs'].get('info'):
                 qp.setFont(QFont(self.win.ui_font, max(6, int(22 * s)))); qp.setPen(QColor('#c9d6ff'))
-                qp.drawText(x_text, y + int(h * .5) + int(34 * s), self.win.store.display(n['pairs']['info']))
+                self._text(qp, x_text, y + int(h * .5) + int(34 * s), self.win.store.display(n['pairs']['info']))
             y += h + int(14 * s)
 
 
