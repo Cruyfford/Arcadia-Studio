@@ -1,0 +1,9 @@
+PySide6>=6.6
+arabic-reshaper>=3.0
+python-bidi>=0.4.2
+numpy>=1.24
+pycryptodome>=3.18
+ecdsa>=0.18
+pycdlib>=1.14
+requests>=2.31
+pillow>=10.0

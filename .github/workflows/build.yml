@@ -1,0 +1,29 @@
+name: Build Arcadia Studio (Windows EXE)
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+      - name: Smoke test (imports)
+        run: python -c "import arcadia_studio.app, arcadia_studio.converter, arcadia_studio.core.ps2conv, arcadia_studio.core.ps1conv; print('imports ok')"
+      - name: Build EXE
+        run: >
+          pyinstaller --noconfirm --onefile --windowed --name ArcadiaStudio
+          --add-data "arcadia_studio/assets;arcadia_studio/assets"
+          --add-data "arcadia_studio/engines;arcadia_studio/engines"
+          --hidden-import Crypto.Cipher.AES --hidden-import Crypto.Hash.CMAC
+          --hidden-import ecdsa --hidden-import pycdlib --hidden-import requests --hidden-import PIL
+          --collect-submodules bidi --collect-data arabic_reshaper
+          run_studio.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArcadiaStudio-Windows
+          path: dist/ArcadiaStudio.exe
