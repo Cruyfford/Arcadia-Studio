@@ -139,7 +139,7 @@ class Main(QMainWindow):
                          ('🛠 بناء PKG', self.build), ('⚡ تحديث سريع للجهاز', self.quick_sync),
                          ('📤 إرسال PKG للجهاز', self.send_pkg_pick), ('📡 إعداد PS3', self.ps3_setup),
                          ('🌍 نشر للجميع', self.publish), ('🔑 إعداد النشر', self.publish_setup),
-                         ('🎮 محوّل الألعاب', self.open_converter), ('🧾 تصدير JSON', self.export_json)]:
+                         ('🎮 محوّل الألعاب', self.open_converter), ('🔗 فحص الروابط', self.open_linkcheck), ('🧾 تصدير JSON', self.export_json)]:
             a = QAction(text, self); a.triggered.connect(fn); tb.addAction(a)
 
         self.tree = QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setIconSize(QSize(46, 26))
@@ -460,6 +460,10 @@ class Main(QMainWindow):
             else:
                 QMessageBox.information(self, 'تم', msg)
         self.run_bg(job, built, 'جاري بناء الحزمة...')
+
+    def open_linkcheck(self):
+        from arcadia_studio.linkcheck_ui import LinkCheckDialog
+        self.lc = LinkCheckDialog(self); self.lc.show()
 
     def open_converter(self):
         from arcadia_studio.converter import ConverterDialog
