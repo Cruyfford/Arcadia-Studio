@@ -38,6 +38,7 @@ class PkgViewer(QDialog):
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(['الملف', 'الحجم', 'النوع'])
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.tree.itemDoubleClicked.connect(lambda it, c: self.edit_file())
         sp.addWidget(self.tree); sp.addWidget(left); sp.setSizes([800, 460])
         v.addWidget(sp, 1)
         self.prog = QProgressBar(); self.prog.hide(); v.addWidget(self.prog)
@@ -50,7 +51,8 @@ class PkgViewer(QDialog):
         v.addLayout(bot)
         # edit-mode toolbar (hidden until editing)
         self.edit_bar = QWidget(); eb = QHBoxLayout(self.edit_bar); eb.setContentsMargins(0, 0, 0, 0)
-        for t, fn, k in [('✏ تغيير الاسم', self.edit_title, 'ghost'), ('🖼 تغيير الأيقونة', lambda: self.replace_image('ICON0.PNG', (320, 176)), 'ghost'),
+        for t, fn, k in [('📝 تعديل الملف', self.edit_file, ''), ('🔢 Hex', lambda: self.edit_file('hex'), 'ghost'),
+                         ('✏ تغيير الاسم', self.edit_title, 'ghost'), ('🖼 تغيير الأيقونة', lambda: self.replace_image('ICON0.PNG', (320, 176)), 'ghost'),
                          ('🌄 تغيير الخلفية', lambda: self.replace_image('PIC1.PNG', (1920, 1080)), 'ghost'),
                          ('➕ إضافة / استبدال ملف', self.add_file, 'ghost'), ('🗑 حذف المحدد', self.delete_sel, 'danger'),
                          ('📂 فتح مجلد التعديل', lambda: self._open(self.edit_dir), 'ghost'), ('🔄 تحديث', self.refresh_edit, 'ghost'),
@@ -199,6 +201,19 @@ class PkgViewer(QDialog):
         if not its: return ''
         rel = its[0].data(0, Qt.UserRole)
         return rel if os.path.isdir(os.path.join(self.edit_dir, rel)) else os.path.dirname(rel)
+
+    def edit_file(self, force=None):
+        its = self.tree.selectedItems()
+        if not its: return
+        if not self.edit_dir:
+            if QMessageBox.question(self, 'تعديل', 'لتعديل الملفات يجب فك الحزمة أولاً (وضع التعديل). ابدأ الآن؟') == QMessageBox.Yes:
+                self.start_edit()
+            return
+        rel = its[0].data(0, Qt.UserRole); p = os.path.join(self.edit_dir, rel)
+        if os.path.isdir(p): return
+        from .file_editors import open_editor
+        dlg = open_editor(self, p, force)
+        if dlg: dlg.finished.connect(lambda *_: self.refresh_edit())
 
     def edit_title(self):
         p = os.path.join(self.edit_dir, 'PARAM.SFO')
