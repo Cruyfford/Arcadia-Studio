@@ -31,21 +31,37 @@ def to_wav(data):
 
 
 class Player:
-    """tiny wrapper around QMediaPlayer"""
+    """plays a WAV: winsound on Windows (no extra libraries), QtMultimedia elsewhere if present"""
     def __init__(self, parent):
-        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-        self.out = QAudioOutput(parent); self.out.setVolume(0.8)
-        self.p = QMediaPlayer(parent); self.p.setAudioOutput(self.out)
+        self.parent = parent; self._qt = None; self._on = False
 
     def play(self, wav, loop=True):
-        from PySide6.QtCore import QUrl
-        from PySide6.QtMultimedia import QMediaPlayer
-        self.p.setLoops(QMediaPlayer.Infinite if loop else 1)
-        self.p.setSource(QUrl.fromLocalFile(wav)); self.p.play()
+        self.stop()
+        if sys.platform.startswith('win'):
+            import winsound
+            winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC | (winsound.SND_LOOP if loop else 0))
+        else:
+            import importlib
+            try:
+                mm = importlib.import_module('PySide6.QtMultimedia')
+                from PySide6.QtCore import QUrl
+                if not self._qt:
+                    out = mm.QAudioOutput(self.parent); p = mm.QMediaPlayer(self.parent); p.setAudioOutput(out)
+                    self._qt = (p, out)
+                p = self._qt[0]
+                p.setLoops(mm.QMediaPlayer.Infinite if loop else 1)
+                p.setSource(QUrl.fromLocalFile(wav)); p.play()
+            except Exception:  # noqa  no audio backend
+                return
+        self._on = True
 
     def stop(self):
-        self.p.stop()
+        if sys.platform.startswith('win'):
+            import winsound
+            winsound.PlaySound(None, 0)
+        elif self._qt:
+            self._qt[0].stop()
+        self._on = False
 
     def playing(self):
-        from PySide6.QtMultimedia import QMediaPlayer
-        return self.p.playbackState() == QMediaPlayer.PlayingState
+        return self._on

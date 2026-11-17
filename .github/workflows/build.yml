@@ -23,7 +23,7 @@ jobs:
           --add-data "arcadia_studio/engines;arcadia_studio/engines"
           --hidden-import Crypto.Cipher.AES --hidden-import Crypto.Hash.CMAC
           --hidden-import ecdsa --hidden-import pycdlib --hidden-import requests --hidden-import PIL
-          --collect-submodules bidi --collect-data arabic_reshaper --collect-submodules fontTools --collect-data imageio_ffmpeg --hidden-import imageio_ffmpeg --hidden-import PySide6.QtMultimedia
+          --collect-submodules bidi --collect-data arabic_reshaper --collect-submodules fontTools --collect-data imageio_ffmpeg --hidden-import imageio_ffmpeg --exclude-module PySide6.QtMultimedia
           --icon arcadia_studio/assets/arcadia.ico
           run_studio.py
       - uses: actions/upload-artifact@v4
@@ -42,4 +42,4 @@ jobs:
           git init -q && git checkout -q -b build
           git -c user.name=ci -c user.email=ci@local add ArcadiaStudio.exe
           git -c user.name=ci -c user.email=ci@local commit -q -m "build ${GITHUB_SHA::7}"
-          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" build
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" build || echo "build branch skipped (file too large) - use the release"
