@@ -43,7 +43,7 @@ class DownloadsDialog(QDialog):
         v.addWidget(self.table)
         bot = QHBoxLayout()
         for t, fn, kind in [('⏸ إيقاف / ▶ استئناف', self.toggle, 'ghost'), ('✖ إلغاء', self.cancel, 'danger'),
-                            ('📂 فتح المجلد', self.open_folder, 'ghost'), ('📤 إرسال للجهاز', self.send_ps3, '')]:
+                            ('📂 فتح المجلد', self.open_folder, 'ghost'), ('📦 عرض محتوى الحزمة', self.view_pkg, 'ghost'), ('📤 إرسال للجهاز', self.send_ps3, '')]:
             b = QPushButton(t); b.clicked.connect(fn)
             if kind: b.setProperty('kind', kind)
             bot.addWidget(b)
@@ -103,6 +103,11 @@ class DownloadsDialog(QDialog):
         os.makedirs(self.folder, exist_ok=True)
         if sys.platform.startswith('win'): os.startfile(self.folder)  # noqa
         else: subprocess.Popen(['xdg-open', self.folder])
+
+    def view_pkg(self):
+        done = [d for d, _, _ in self.selected() if d.state == 'done' and d.path.lower().endswith('.pkg')]
+        if done: self.win.open_pkgview(done[0].path)
+        else: QMessageBox.information(self, 'تنبيه', 'اختر حزمة PKG مكتملة التنزيل')
 
     def send_ps3(self):
         done = [d for d, _, _ in self.selected() if d.state == 'done']

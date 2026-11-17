@@ -28,15 +28,32 @@ def crypt(key16, data, start=0):
     return bytes(a ^ b for a, b in zip(data, ks))
 
 
+# public PKG keys (same as PkgDecrypt / pkg2zip)
+PS3_PKG_KEY = bytes.fromhex('2E7B71D7C9C9A14EA3221F188828B8F8')
+PSP_PKG_KEY = bytes.fromhex('07F2C68290B50D2C33818D709B60E62B')
+
+
+def _ctr(key, iv16, data, block):
+    from Crypto.Cipher import AES
+    from Crypto.Util import Counter
+    ctr = Counter.new(128, initial_value=(int.from_bytes(iv16, 'big') + block) % (1 << 128))
+    return AES.new(key, AES.MODE_CTR, counter=ctr).decrypt(data)
+
+
 class PkgReader:
     def __init__(self, path):
+        self.path = path
         self.f = open(path, 'rb')
         self.header = bytearray(self.f.read(0x180))
         if self.header[:4] != b'\x7fPKG':
             raise ValueError('ليس ملف PKG صالحاً')
-        rev, = struct.unpack('>H', self.header[4:6])
-        if rev & 0x8000:
-            raise ValueError('هذه حزمة Retail مشفرة بمفتاح سوني؛ البرنامج يدعم حزم Debug فقط')
+        rev, self.pkg_type = struct.unpack('>HH', self.header[4:8])
+        self.retail = bool(rev & 0x8000)
+        if self.retail and self.pkg_type not in (1, 2):
+            raise ValueError('نوع حزمة غير مدعوم (PS Vita/PSM)')
+        self.riv = bytes(self.header[0x70:0x80])
+        self.key = PS3_PKG_KEY if self.pkg_type == 1 else PSP_PKG_KEY
+        self.total_size, = struct.unpack('>Q', self.header[0x18:0x20])
         self.qa = bytes(self.header[0x60:0x70])
         self.count, = struct.unpack('>I', self.header[0x14:0x18])
         self.data_off, = struct.unpack('>Q', self.header[0x20:0x28])
@@ -46,7 +63,35 @@ class PkgReader:
         self.f.seek(self.data_off + (off // 16) * 16)
         pre = off % 16
         blob = self.f.read(((pre + size + 15) // 16) * 16)
+        if self.retail:
+            return _ctr(self.key, self.riv, blob, off // 16)[pre:pre + size]
         return crypt(self.qa, blob, off // 16)[pre:pre + size]
+
+    @property
+    def kind(self):
+        return ('Retail' if self.retail else 'Debug') + (' PS3' if self.pkg_type == 1 else ' PSP')
+
+    def read_file(self, name):
+        for n, do, ds, fl in self.entries():
+            if n == name and fl & 0xFF != 4:
+                return self.read(do, ds)
+        return None
+
+    def extract_some(self, names, out_dir, progress=None):
+        ents = [e for e in self.entries() if e[0] in names or any(e[0].startswith(x.rstrip('/') + '/') for x in names)]
+        total = sum(e[2] for e in ents) or 1; done = 0
+        for name, do, ds, fl in ents:
+            p = os.path.join(out_dir, name)
+            if fl & 0xFF == 4:
+                os.makedirs(p, exist_ok=True); continue
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'wb') as o:
+                pos = 0
+                while pos < ds:
+                    n = min(8 << 20, ds - pos)
+                    o.write(self.read(do + pos, n)); pos += n; done += n
+                    if progress: progress(done, total)
+        return len(ents)
 
     def entries(self):
         tbl = self.read(0, self.count * 32)

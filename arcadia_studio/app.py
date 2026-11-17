@@ -139,7 +139,7 @@ class Main(QMainWindow):
                          ('🛠 بناء PKG', self.build), ('⚡ تحديث سريع للجهاز', self.quick_sync),
                          ('📤 إرسال PKG للجهاز', self.send_pkg_pick), ('📡 إعداد PS3', self.ps3_setup),
                          ('🌍 نشر للجميع', self.publish), ('🔑 إعداد النشر', self.publish_setup),
-                         ('🎮 محوّل الألعاب', self.open_converter), ('🔗 فحص الروابط', self.open_linkcheck), ('⬇ التنزيلات', lambda: self.downloads().show()), ('🧾 تصدير JSON', self.export_json)]:
+                         ('🎮 محوّل الألعاب', self.open_converter), ('🔗 فحص الروابط', self.open_linkcheck), ('⬇ التنزيلات', lambda: self.downloads().show()), ('📦 عارض PKG', self.open_pkgview), ('🧾 تصدير JSON', self.export_json)]:
             a = QAction(text, self); a.triggered.connect(fn); tb.addAction(a)
 
         self.tree = QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setIconSize(QSize(46, 26))
@@ -464,6 +464,10 @@ class Main(QMainWindow):
     def open_linkcheck(self):
         from arcadia_studio.linkcheck_ui import LinkCheckDialog
         self.lc = LinkCheckDialog(self); self.lc.showMaximized()
+
+    def open_pkgview(self, path=None):
+        from arcadia_studio.pkgview_ui import PkgViewer
+        self.pv = PkgViewer(self, path if isinstance(path, str) else None); self.pv.show()
 
     def downloads(self):
         if not getattr(self, 'dm', None):
