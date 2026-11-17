@@ -117,6 +117,12 @@ class Store:
                             pairs=pairs, target=self.resolve(rel, a.get('src')), file=rel, view=vid))
         return out
 
+    def text_raw(self, node, key):
+        """the exact string the PS3 will draw (already shaped, visual order)"""
+        import html as _h
+        v = node['pairs'].get(key, node['key'] if key == 'title' else '')
+        return _h.unescape(v)
+
     def display(self, s):
         """XMB string -> editable text"""
         return self.src.get(s) or from_xmb(s)

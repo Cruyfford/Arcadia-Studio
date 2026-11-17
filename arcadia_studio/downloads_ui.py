@@ -59,6 +59,7 @@ class DownloadsDialog(QDialog):
             add(m, '✖ إلغاء التنزيل', self.cancel, shortcut='Delete')
             m.addSeparator()
             add(m, '📦 عرض محتوى الحزمة', self.view_pkg)
+            add(m, '🏪 إضافة للمتجر (الاسم والأيقونة من الحزمة)', self.add_to_store)
             add(m, '📤 إرسال للجهاز وتثبيت', self.send_ps3)
         m.addSeparator()
         add(m, '📂 فتح مجلد التنزيلات', self.open_folder)
@@ -126,6 +127,13 @@ class DownloadsDialog(QDialog):
         done = [d for d, _, _ in self.selected() if d.state == 'done' and d.path.lower().endswith('.pkg')]
         if done: self.win.open_pkgview(done[0].path)
         else: QMessageBox.information(self, 'تنبيه', 'اختر حزمة PKG مكتملة التنزيل')
+
+    def add_to_store(self):
+        for d, _, _ in self.selected():
+            if d.state == 'done' and d.path.lower().endswith('.pkg'):
+                self.win.goto(self.win.stack.widget(0)); self.win.add_game_from_pkg(d.path, url=d.url)
+            else:
+                QMessageBox.information(self, 'تنبيه', 'اختر حزمة PKG مكتملة التنزيل')
 
     def send_ps3(self):
         done = [d for d, _, _ in self.selected() if d.state == 'done']

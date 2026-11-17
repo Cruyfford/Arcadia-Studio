@@ -268,8 +268,14 @@ class Main(QMainWindow):
         self.pv = as_page(PkgViewer(self)); self.conv = as_page(ConverterDialog(self))
         self.lc = as_page(LinkCheckDialog(self)); self.dm = as_page(DownloadsDialog(self))
         self.device = DevicePage(self)
+        from arcadia_studio.ftp_ui import FtpPage
+        self.ftp = FtpPage(self)
         self.pages = [('🏪', 'المتجر', store_page), ('📦', 'عارض ومحرر PKG', self.pv), ('🎮', 'محوّل الألعاب', self.conv),
-                      ('🔗', 'فحص الروابط', self.lc), ('⬇', 'التنزيلات', self.dm), ('📡', 'الجهاز والنشر', self.device)]
+                      ('🔗', 'فحص الروابط', self.lc), ('⬇', 'التنزيلات', self.dm), ('📂', 'ملفات الجهاز', self.ftp),
+                      ('📡', 'الجهاز والنشر', self.device)]
+        for i, (ic, name, _) in enumerate(self.pages):
+            add(self.view_menu, '%s %s' % (ic, name), lambda i=i: self.nav.setCurrentRow(i), shortcut='Ctrl+%d' % (i + 1))
+        add(self.view_menu, '📺 معاينة شكل الجهاز (XMB)', self.open_xmb, shortcut='F11')
         self.nav = QListWidget(); self.nav.setObjectName('nav'); self.nav.setFixedWidth(230)
         self.nav.setIconSize(QSize(22, 22))
         logo = QLabel(); logo.setAlignment(Qt.AlignCenter); logo.setObjectName('logo')
@@ -312,6 +318,9 @@ class Main(QMainWindow):
         add(m, '💾 حفظ', self.save, shortcut='Ctrl+S')
         add(m, '🗜 حفظ كمشروع صغير (.arcadia / .json)...', self.save_project_as, shortcut='Ctrl+Shift+S')
         add(m, '🧾 تصدير كتالوج JSON لتطبيق PS3...', self.export_json)
+        add(m, '🕘 سجل النسخ (استرجاع نسخة قديمة)...', self.open_history, shortcut='Ctrl+H')
+        m.addSeparator()
+        add(m, '📦 إضافة لعبة من ملف PKG...', lambda: self.add_game_from_pkg(target=self.default_target()))
         m.addSeparator()
         add(m, '🛠 بناء PKG...', self.build, shortcut='Ctrl+B')
         add(m, '🧱 تحديد المتجر الأساسي (للبناء من المشروع)...', lambda: self.choose_base(None))
@@ -320,14 +329,12 @@ class Main(QMainWindow):
         m = mb.addMenu('الجهاز')
         add(m, '⚡ إرسال التعديلات للجهاز (تحديث سريع)', self.quick_sync, shortcut='F6')
         add(m, '📤 إرسال حزمة PKG للجهاز وتثبيتها...', self.send_pkg_pick)
+        add(m, '📂 ملفات الجهاز (FTP)', lambda: self.goto(self.ftp))
         add(m, '📡 إعداد الاتصال بالجهاز...', self.ps3_setup)
         m = mb.addMenu('النشر')
         add(m, '🌍 نشر تحديث للجميع', self.publish, shortcut='F7')
         add(m, '🔑 إعداد النشر (archive.org)...', self.publish_setup)
-        m = mb.addMenu('عرض')
-        for i, (ic, name) in enumerate([('🏪', 'المتجر'), ('📦', 'عارض ومحرر PKG'), ('🎮', 'محوّل الألعاب'), ('🔗', 'فحص الروابط'),
-                                        ('⬇', 'التنزيلات'), ('📡', 'الجهاز والنشر')]):
-            add(m, '%s %s' % (ic, name), lambda i=i: self.nav.setCurrentRow(i), shortcut='Ctrl+%d' % (i + 1))
+        self.view_menu = mb.addMenu('عرض')
 
     def on_page(self, i):
         self.stack.setCurrentIndex(i)
@@ -346,7 +353,17 @@ class Main(QMainWindow):
         for u in e.mimeData().urls():
             f = u.toLocalFile(); low = f.lower()
             if low.endswith(('.arcadia', '.json')): return self.open_project(f)
-            if low.endswith('.pkg'): return self.open_pkgview(f)
+            if low.endswith('.pkg'):
+                pk = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile().lower().endswith('.pkg')]
+                if self.stack.currentIndex() == 0 and self.store:
+                    vp = self.tree.viewport(); pos = vp.mapFrom(self, e.position().toPoint())
+                    it = self.tree.itemAt(pos) if vp.rect().contains(pos) else None
+                    tgt = None
+                    if it and it.data(0, Qt.UserRole):
+                        n = it.data(0, Qt.UserRole)
+                        tgt = n['target'] if (n['cls'] == FOLDER and n['target']) else (n['file'], n['view'])
+                    return self.add_game_from_pkg(pk, target=tgt)
+                return self.open_pkgview(f)
             if os.path.isdir(f): return self.load_ws(f)
 
     # ---------------- right-click menu of the store tree
@@ -369,8 +386,10 @@ class Main(QMainWindow):
                 add(m, '🌐 فتح الرابط في المتصفح', lambda: __import__('webbrowser').open(url))
                 m.addSeparator()
         add(m, '➕ إضافة لعبة هنا...', self.add_game, shortcut='Insert')
+        add(m, '📦 إضافة لعبة من ملف PKG...', lambda: self.add_game_from_pkg(target=self.default_target()))
         add(m, '📁 قسم جديد هنا...', self.add_section)
         if n:
+            add(m, '📺 معاينة شكل الجهاز من هنا', self.open_xmb, shortcut='F11')
             m.addSeparator()
             add(m, '✏ تعديل الاسم', lambda: (self.e_title.setFocus(), self.e_title.selectAll()), shortcut='F2')
             add(m, '🖼 تغيير الأيقونة...', lambda: self.pick_image(self.e_icon, 'ICONS'))
@@ -678,7 +697,7 @@ class Main(QMainWindow):
         walk(root[0]['target'], '', 1)
         return out
 
-    def ask(self, title, fields, with_section=True, default_target=None):
+    def ask(self, title, fields, with_section=True, default_target=None, defaults=None, ok_text='إضافة', image=None):
         dlg = QDialog(self); dlg.setWindowTitle(title); dlg.setMinimumWidth(560)
         fl = QFormLayout(dlg); edits = {}
         sec = None
@@ -688,14 +707,18 @@ class Main(QMainWindow):
             if default_target in [t for _, t in secs]:
                 sec.setCurrentIndex([t for _, t in secs].index(default_target))
             fl.addRow('القسم', sec)
+        if image:
+            pl = QLabel(); pm = QPixmap(); pm.loadFromData(image)
+            if not pm.isNull(): pl.setPixmap(pm.scaled(240, 132, Qt.KeepAspectRatio, Qt.SmoothTransformation)); fl.addRow('الأيقونة', pl)
+        defaults = defaults or {}
         for k, lab in fields:
             if k == 'method':
                 e = QComboBox(); e.addItems(['webMAN — تنزيل في الخلفية (موصى به)', 'متصفح PS3', 'متجر PSN (pkg_src)'])
             else:
-                e = QLineEdit()
+                e = QLineEdit(str(defaults.get(k, '')))
             fl.addRow(lab, e); edits[k] = e
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText('إضافة'); bb.button(QDialogButtonBox.Cancel).setText('إلغاء')
+        bb.button(QDialogButtonBox.Ok).setText(ok_text); bb.button(QDialogButtonBox.Cancel).setText('إلغاء')
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); fl.addRow(bb)
         if dlg.exec() != QDialog.Accepted: return None
         res = {k: (e.currentIndex() if isinstance(e, QComboBox) else e.text().strip()) for k, e in edits.items()}
@@ -720,6 +743,44 @@ class Main(QMainWindow):
                                    **({'pic': bg} if bg else {})}, ACTION)
         if r['link']: self._set_link(f, v, key, r['link'], r['method'])
         self.after_add(f, v, key)
+
+    def add_game_from_pkg(self, path=None, url='', target=None):
+        """read title/icon/background/size from a game PKG and add it to the store"""
+        if not self.store:
+            QMessageBox.information(self, 'تنبيه', 'افتح المتجر أولاً (ملف ← فتح مشروع أو حزمة المتجر)'); return
+        paths = [path] if isinstance(path, str) else (path or [])
+        if not paths:
+            paths, _ = QFileDialog.getOpenFileNames(self, 'اختر حزم الألعاب', '', 'PKG (*.pkg)')
+        from arcadia_studio.core.pkginfo import pkg_meta, save_png
+        for p in paths:
+            try:
+                m = pkg_meta(p)
+            except Exception as e:  # noqa
+                QMessageBox.warning(self, 'تنبيه', 'تعذّرت قراءة الحزمة:\n%s\n%s' % (p, e)); continue
+            clip = QApplication.clipboard().text().strip()
+            link = url or (clip if clip.startswith(('http://', 'https://')) else '')
+            r = self.ask('إضافة لعبة من PKG — ' + os.path.basename(p),
+                         [('title', 'اسم اللعبة'), ('info', 'الوصف'), ('link', 'رابط ملف PKG'), ('method', 'طريقة التنزيل')],
+                         default_target=target or self.default_target(), defaults={**m, 'link': link}, image=m['icon'])
+            if not r or not r['title'] or not r['target']: continue
+            f, v = r['target']
+            ident = (m['content_id'] or m['title_id'] or 'game_%d' % int(time.time())).replace(' ', '_')
+            pairs = {'title': r['title'], 'info': r['info']}
+            for kind, sub, size in (('icon', 'ICONS', (320, 176)), ('pic', 'BG', (1920, 1080))):
+                if m[kind]:
+                    rel = 'USRDIR/ARCADIA/%s/%s.png' % (sub, ident)
+                    try:
+                        save_png(m[kind], os.path.join(self.store.root, rel), size)
+                        self.store.mark_changed(rel); pairs[kind] = STORE_PREFIX + rel
+                    except Exception:  # noqa  broken image inside the pkg
+                        pass
+            pairs.setdefault('icon', STORE_PREFIX + 'USRDIR/XMB/PS3.png')
+            if 'pic' not in pairs:
+                bg = next((c['pairs'].get('pic') for c in self.store.children(f, v) if c['pairs'].get('pic')), '')
+                if bg: pairs['pic'] = bg
+            key = self.store.add_node(f, v, 'game_%s_%d' % (ident[-12:].replace('-', '_'), int(time.time() * 1000) % 100000), pairs, ACTION)
+            if r['link']: self._set_link(f, v, key, r['link'], r['method'])
+            self.after_add(f, v, key)
 
     def add_section(self):
         if not self.store: return
@@ -788,6 +849,11 @@ class Main(QMainWindow):
         if not self.store: return
         self.apply()
         self.store.save()
+        try:
+            from arcadia_studio.core import history
+            history.snapshot(self.store.root, 'حفظ')
+        except Exception:  # noqa  history must never block saving
+            pass
         if self.project:
             st, out = self.store, self.project
             self.run_bg(lambda prog: projmod.export_project(st, out, thumbs=not out.lower().endswith('.json'), progress=prog),
@@ -834,6 +900,16 @@ class Main(QMainWindow):
         ic = n['pairs'].get('icon')
         self.downloads().add(url, self.store.display(n['pairs'].get('title', n['key'])), self.store.abs_path(ic) if ic else None)
         self.goto(self.dm)
+
+    def open_xmb(self):
+        if not self.store: return
+        from arcadia_studio.xmb_ui import XmbDialog
+        self.xmbd = XmbDialog(self, self.cur); self.xmbd.show()
+
+    def open_history(self):
+        if not self.store: return
+        from arcadia_studio.history_ui import HistoryDialog
+        HistoryDialog(self).exec()
 
     def open_converter(self):
         self.goto(self.conv)

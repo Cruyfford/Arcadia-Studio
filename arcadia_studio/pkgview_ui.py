@@ -70,6 +70,10 @@ class PkgViewer(QDialog):
             add(m, '📝 فتح / تعديل الملف', lambda: self.need_edit(self.edit_file), len(sel) == 1, 'Return')
             add(m, '🔢 فتح في محرر Hex', lambda: self.need_edit(lambda: self.edit_file('hex')), len(sel) == 1)
             add(m, '🔓 فك تشفير المحدد', lambda: self.need_edit(self.decrypt_sel))
+            sub = m.addMenu('🔤 أدوات التعريب')
+            add(sub, '🔤 نصوص هذا الملف (استخراج وترجمة وكتابة)', lambda: self.need_edit(self.strings_tool), len(sel) == 1)
+            add(sub, '🅰 إضافة الحروف العربية لهذا الخط', lambda: self.need_edit(self.font_tool),
+                len(sel) == 1 and rel.lower().endswith(('.ttf', '.otf', '.ttc')))
             add(m, '⬇ استخراج المحدد...', self.extract_sel)
             m.addSeparator()
             add(m, '➕ إضافة / استبدال ملفات هنا...', lambda: self.need_edit(self.add_file))
@@ -264,6 +268,37 @@ class PkgViewer(QDialog):
         from .file_editors import open_editor
         dlg = open_editor(self, p, force)
         if dlg: dlg.finished.connect(lambda *_: self.refresh_edit())
+
+    # ---------- Arabization tools
+    def _sel_file(self):
+        its = self.tree.selectedItems()
+        if not its or not self.edit_dir: return None
+        p = os.path.join(self.edit_dir, its[0].data(0, Qt.UserRole))
+        return p if os.path.isfile(p) else None
+
+    def strings_tool(self):
+        p = self._sel_file()
+        if not p: return
+        from .strings_ui import StringsDialog
+        d = StringsDialog(self, p); d.show()
+
+    def font_tool(self):
+        p = self._sel_file()
+        if not p: return
+        from .core.fontmerge import merge_arabic
+        import shutil as _sh
+        bak = p + '.bak'
+
+        def job(prog):
+            if not os.path.exists(bak): _sh.copy(p, bak)
+            return merge_arabic(bak, p)
+
+        def done(n):
+            self.refresh_edit()
+            QMessageBox.information(self, 'تم', ('تمت إضافة %d حرف عربي للخط (مع أشكال الحروف المتصلة).\nالأصل محفوظ: %s\n\n'
+                                    'النص العربي يُكتب في ملفات اللعبة بأداة «نصوص هذا الملف».' % (n, os.path.basename(bak)))
+                                    if n else 'الخط يحتوي الحروف العربية مسبقاً.')
+        self._run(job, done)
 
     # ---------- decryption (SELF/SPRX/EDAT/SDAT)
     def rap_dirs(self):
