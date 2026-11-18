@@ -189,12 +189,18 @@ struct PkgEditView: View {
                 Group {
                     if isDir {
                         NavigationLink { PkgEditView(root: root, dir: u, contentID: contentID, pkgName: pkgName) } label: { row(u, true) }
+                    } else if FileEditorView.kindOf(u) == "hex" {
+                        NavigationLink { HexEditorView(url: u) } label: { row(u, false) }
                     } else {
                         NavigationLink { FileEditorView(url: u) } label: { row(u, false) }
                     }
                 }
                 .contextMenu {
-                    if !isDir { Button { share = u } label: { Label("مشاركة / تصدير", systemImage: "square.and.arrow.up") } }
+                    if !isDir {
+                        Button { share = u } label: { Label("مشاركة / تصدير", systemImage: "square.and.arrow.up") }
+                        NavigationLink { HexEditorView(url: u) } label: { Label("فتح في محرر Hex", systemImage: "number") }
+                        NavigationLink { StringsToolView(url: u) } label: { Label("🔤 تعريب: نصوص هذا الملف", systemImage: "character.book.closed") }
+                    }
                     Button { renaming = u; newName = u.lastPathComponent } label: { Label("إعادة تسمية", systemImage: "pencil") }
                     Button(role: .destructive) { try? FileManager.default.removeItem(at: u); reload() } label: { Label("حذف", systemImage: "trash") }
                 }
@@ -278,7 +284,8 @@ struct FileEditorView: View {
         default: return "doc"
         }
     }
-    var kind: String {
+    var kind: String { FileEditorView.kindOf(url) }
+    static func kindOf(_ url: URL) -> String {
         let e = url.pathExtension.lowercased()
         if url.lastPathComponent.uppercased() == "PARAM.SFO" { return "sfo" }
         if ["png", "jpg", "jpeg", "gif", "bmp"].contains(e) { return "image" }
@@ -309,7 +316,7 @@ struct FileEditorView: View {
             case "text":
                 TextEditor(text: $text).font(.system(.footnote, design: .monospaced)).environment(\.layoutDirection, .leftToRight).padding(4)
             default:
-                ScrollView { Text(hex).font(.system(size: 11, design: .monospaced)).environment(\.layoutDirection, .leftToRight).frame(maxWidth: .infinity, alignment: .leading).padding() }
+                HexEditorView(url: url)
             }
         }
         .navigationTitle(url.lastPathComponent).navigationBarTitleDisplayMode(.inline)
@@ -317,6 +324,8 @@ struct FileEditorView: View {
             if kind == "sfo" || kind == "text" { Button("حفظ") { save() } }
             Menu {
                 Button { replacing = true } label: { Label("استبدال بملف", systemImage: "arrow.triangle.2.circlepath") }
+                NavigationLink { HexEditorView(url: url) } label: { Label("فتح في محرر Hex", systemImage: "number") }
+                NavigationLink { StringsToolView(url: url) } label: { Label("🔤 تعريب: نصوص هذا الملف", systemImage: "character.book.closed") }
                 Button { share = url } label: { Label("مشاركة / تصدير", systemImage: "square.and.arrow.up") }
             } label: { Image(systemName: "ellipsis.circle") }
         }
