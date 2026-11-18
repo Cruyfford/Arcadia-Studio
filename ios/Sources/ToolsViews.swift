@@ -168,6 +168,7 @@ struct PkgViewerView: View {
     @State private var picking = false
     @State private var share: URL?
     @State private var localURL: URL?
+    @State private var editRoot: URL?
 
     var body: some View {
         NavigationStack {
@@ -215,6 +216,7 @@ struct PkgViewerView: View {
                 Menu {
                     Button { picking = true } label: { Label("فتح PKG...", systemImage: "folder") }
                     if reader != nil {
+                        Button { startEdit() } label: { Label("✏ تعديل الحزمة (الملفات، الاسم، الصور، إعادة البناء)", systemImage: "pencil") }
                         Button { extractAll() } label: { Label("استخراج الكل", systemImage: "tray.and.arrow.down") }
                         Button { sendPS3() } label: { Label("إرسال للجهاز وتثبيت", systemImage: "gamecontroller") }
                     }
@@ -222,6 +224,25 @@ struct PkgViewerView: View {
             }
             .docPicker(isPresented: $picking) { open($0[0]) }
             .sheet(item: Binding(get: { share.map { ShareItem(url: $0) } }, set: { share = $0?.url })) { ShareSheet(url: $0.url) }
+            .navigationDestination(isPresented: Binding(get: { editRoot != nil }, set: { if !$0 { editRoot = nil } })) {
+                if let root = editRoot, let r = reader {
+                    PkgEditView(root: root, dir: root, contentID: r.contentID, pkgName: r.url.deletingPathExtension().lastPathComponent)
+                }
+            }
+        }
+    }
+
+    func startEdit() {
+        guard let r = reader else { return }
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Edit").appendingPathComponent(r.url.deletingPathExtension().lastPathComponent)
+        if FileManager.default.fileExists(atPath: dir.path) { editRoot = dir; return }
+        let total = r.entries.reduce(Int64(0)) { $0 + Int64($1.size) }
+        app.run("جاري فك الحزمة للتعديل...") { prog in
+            var done: Int64 = 0
+            for e in r.entries { _ = try r.extract(e, to: dir) { n in done += n; prog(Double(done) / Double(max(total, 1))) } }
+            await MainActor.run { editRoot = dir }
+            return nil
         }
     }
 
