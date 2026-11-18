@@ -33,7 +33,6 @@ targets:
         NSLocalNetworkUsageDescription: الاتصال بجهاز PS3 في شبكتك (webMAN و FTP)
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-          NSAllowsLocalNetworking: true
         UTExportedTypeDeclarations:
           - UTTypeIdentifier: com.cruyfford.arcadia
             UTTypeDescription: Arcadia Store Project

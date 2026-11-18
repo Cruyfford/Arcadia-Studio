@@ -184,7 +184,10 @@ final class DownloadTask: NSObject, ObservableObject, Identifiable, URLSessionDa
             return tasks.isEmpty
         }
         if let e = error as? URLError, e.code == .cancelled { return }
-        if error != nil { Task { await set("⚠ انقطع — اضغط استئناف") }; return }
+        if let e = error { Task { await set("⚠ انقطع: \(e.localizedDescription) — اضغط مطوّلاً ← استئناف") }; return }
+        if let h = task.response as? HTTPURLResponse, h.statusCode >= 400 {
+            Task { await set("❌ خطأ من الخادم \(h.statusCode)") }; return
+        }
         if finished {
             try? fh?.close()
             let got = q.sync { segs.reduce(Int64(0)) { $0 + ($1.pos - $1.start) } }
