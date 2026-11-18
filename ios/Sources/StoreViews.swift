@@ -59,6 +59,7 @@ struct StoreHome: View {
 
 // ================= a section (folder) of the store
 struct SectionView: View {
+    @EnvironmentObject var app: AppState
     @ObservedObject var store: StoreProject
     let target: Target
     let title: String
@@ -96,7 +97,7 @@ struct SectionView: View {
                 EditButton()
             }
         }
-        .sheet(item: $editing) { NodeEditor(store: store, node: $0) }
+        .sheet(item: $editing) { NodeEditor(store: store, node: $0).environmentObject(app) }
         .sheet(isPresented: $addGame) { AddSheet(store: store, target: target, section: false) }
         .sheet(isPresented: $addSection) { AddSheet(store: store, target: target, section: true) }
         .confirmationDialog("حذف «\(confirmDelete.map { store.title($0) } ?? "")» من القائمة؟", isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } }), titleVisibility: .visible) {
@@ -128,7 +129,7 @@ struct SectionView: View {
     @ViewBuilder func menu(_ n: Node, _ nodes: [Node]) -> some View {
         Button { editing = n } label: { Label("تعديل", systemImage: "pencil") }
         if let u = n.link {
-            Button { Downloads.shared.add(u, connections: UserDefaults.standard.integer(forKey: "dl_conns").clamped(1, 16, def: 8)) } label: { Label("تنزيل على الجوال", systemImage: "arrow.down.circle") }
+            Button { Downloads.shared.add(u, connections: UserDefaults.standard.integer(forKey: "dl_conns").clamped(1, 16, def: 8)); app.tab = 3 } label: { Label("تنزيل على الجوال", systemImage: "arrow.down.circle") }
             Button { UIPasteboard.general.string = u } label: { Label("نسخ الرابط", systemImage: "doc.on.doc") }
             Button { sendToPS3(u) } label: { Label("تنزيل مباشرة في الجهاز", systemImage: "gamecontroller") }
         }
@@ -152,6 +153,7 @@ extension Int {
 
 // ================= edit one item (changes apply immediately)
 struct NodeEditor: View {
+    @EnvironmentObject var app: AppState
     @ObservedObject var store: StoreProject
     let node: Node
     @Environment(\.dismiss) var dismiss
@@ -175,6 +177,20 @@ struct NodeEditor: View {
                     HStack(spacing: 16) {
                         PhotosPicker(selection: $iconItem, matching: .images) { imgBox(icon, 120, 66, "الأيقونة") }
                         PhotosPicker(selection: $picItem, matching: .images) { imgBox(pic, 140, 79, "الخلفية") }
+                    }
+                }
+                if let u = node.link {
+                    Section {
+                        Button {
+                            Downloads.shared.add(u, connections: UserDefaults.standard.integer(forKey: "dl_conns").clamped(1, 16, def: 8))
+                            dismiss(); app.tab = 3
+                        } label: { Label("تنزيل على الجوال", systemImage: "arrow.down.circle.fill") }
+                        Button {
+                            let ip = UserDefaults.standard.string(forKey: "ps3_ip") ?? ""
+                            guard !ip.isEmpty else { app.message = "اكتب IP الجهاز في تبويب «الجهاز» أولاً"; return }
+                            app.run("جاري إرسال طلب التنزيل للجهاز...") { _ in try await PS3(ip: ip).remoteDownload(u); return "📥 بدأ التنزيل في الجهاز (webMAN) — يُحفظ في /dev_hdd0/packages" }
+                        } label: { Label("تنزيل مباشرة في الجهاز", systemImage: "gamecontroller.fill") }
+                        Button { UIPasteboard.general.string = u } label: { Label("نسخ الرابط", systemImage: "doc.on.doc") }
                     }
                 }
                 if !node.isFolder {
