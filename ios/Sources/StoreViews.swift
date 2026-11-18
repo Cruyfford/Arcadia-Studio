@@ -7,7 +7,6 @@ struct StoreHome: View {
     @EnvironmentObject var app: AppState
     @State private var importing = false
     @State private var history = false
-    @State private var xmb = false
 
     var body: some View {
         NavigationStack {
@@ -31,7 +30,7 @@ struct StoreHome: View {
                         if app.store != nil {
                             Button { app.save() } label: { Label("حفظ", systemImage: "square.and.arrow.down") }
                             if let u = app.store?.url { ShareLink(item: u) { Label("مشاركة / تصدير الملف", systemImage: "square.and.arrow.up") } }
-                            Button { xmb = true } label: { Label("معاينة شكل الجهاز", systemImage: "tv") }
+                            Button { app.showXMB = true } label: { Label("معاينة شكل الجهاز", systemImage: "tv") }
                             Button { history = true } label: { Label("سجل النسخ", systemImage: "clock.arrow.circlepath") }
                             Button { sync() } label: { Label("إرسال التعديلات للجهاز", systemImage: "bolt.fill") }
                         }
@@ -42,7 +41,7 @@ struct StoreHome: View {
                 if case .success(let u) = r { app.open(u) }
             }
             .sheet(isPresented: $history) { HistoryView() }
-            .fullScreenCover(isPresented: $xmb) { if let s = app.store { XMBPreview(store: s) } }
+            .fullScreenCover(isPresented: $app.showXMB) { if let s = app.store { XMBPreview(store: s) } }
         }
     }
 

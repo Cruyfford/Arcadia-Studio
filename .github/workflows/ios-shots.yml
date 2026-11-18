@@ -1,0 +1,43 @@
+name: iOS screenshots
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  shots:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for simulator
+        run: |
+          brew install xcodegen && cd ios && xcodegen generate
+          xcodebuild -project ArcadiaStudio.xcodeproj -scheme ArcadiaStudio -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build | grep -E "error:|BUILD" || true
+          test -d build/Build/Products/Debug-iphonesimulator/ArcadiaStudio.app
+      - name: Run and capture
+        run: |
+          set -x
+          DEV=$(xcrun simctl list devices available | grep -E "iPhone 1[5-7] Pro \(" | head -1 | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/')
+          xcrun simctl boot "$DEV"; xcrun simctl bootstatus "$DEV" -b
+          xcrun simctl status_bar "$DEV" override --time "9:41" --batteryState charged --batteryLevel 100 || true
+          xcrun simctl install "$DEV" ios/build/Build/Products/Debug-iphonesimulator/ArcadiaStudio.app
+          ID=com.cruyfford.arcadiastudio
+          DATA=$(xcrun simctl get_app_container "$DEV" $ID data)
+          mkdir -p "$DATA/Documents/Projects" && cp ios/Demo/ARCADIA.arcadia "$DATA/Documents/Projects/"
+          xcrun simctl spawn "$DEV" defaults write $ID last_project ARCADIA.arcadia
+          xcrun simctl spawn "$DEV" defaults write $ID ps3_ip 192.168.1.20
+          mkdir -p shots
+          shot() { xcrun simctl terminate "$DEV" $ID || true; xcrun simctl launch "$DEV" $ID "$@"; sleep 7; xcrun simctl io "$DEV" screenshot "shots/$NAME.png"; }
+          NAME=1_store shot -tab 0
+          NAME=2_xmb shot -tab 0 -xmb
+          NAME=3_device shot -tab 1
+          NAME=4_links shot -tab 2
+          NAME=5_downloads shot -tab 3
+          NAME=6_pkg shot -tab 4
+          ls -la shots
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ios-shots -y --cleanup-tag || true
+          gh release create ios-shots shots/*.png -t "iOS screenshots" -n "simulator" --prerelease

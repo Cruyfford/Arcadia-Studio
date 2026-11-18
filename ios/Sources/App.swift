@@ -11,6 +11,7 @@ final class AppState: ObservableObject {
     @Published var busy: String?
     @Published var progress: Double?
     @Published var tab = 0
+    @Published var showXMB = false
 
     static var projectsDir: URL {
         let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Projects")
@@ -72,7 +73,13 @@ struct ArcadiaStudioApp: App {
                 .preferredColorScheme(.dark)
                 .tint(Color(red: 0.49, green: 0.23, blue: 0.93))
                 .onOpenURL { app.open($0) }
-                .onAppear { app.reopenLast() }
+                .onAppear {
+                    app.reopenLast()
+                    // launch arguments used for screenshots: -tab N, -xmb
+                    let a = ProcessInfo.processInfo.arguments
+                    if let i = a.firstIndex(of: "-tab"), i + 1 < a.count, let t = Int(a[i + 1]) { app.tab = t }
+                    if a.contains("-xmb") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { app.showXMB = true } }
+                }
         }
     }
 }
