@@ -28,7 +28,7 @@ final class AppState: ObservableObject {
             if !url.path.hasPrefix(AppState.projectsDir.path) {
                 local = AppState.projectsDir.appendingPathComponent(url.lastPathComponent)
                 try? FileManager.default.removeItem(at: local)
-                try FileManager.default.copyItem(at: url, to: local)
+                if (try? FileManager.default.moveItem(at: url, to: local)) == nil { try FileManager.default.copyItem(at: url, to: local) }
             }
             store = try StoreProject.load(local)
             UserDefaults.standard.set(local.lastPathComponent, forKey: "last_project")

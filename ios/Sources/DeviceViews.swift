@@ -24,9 +24,7 @@ struct DeviceView: View {
                 }
             }
             .navigationTitle("الجهاز")
-            .fileImporter(isPresented: $pickPkg, allowedContentTypes: [.data]) { r in
-                if case .success(let u) = r { send(u) }
-            }
+            .docPicker(isPresented: $pickPkg) { send($0[0]) }
         }
     }
 
@@ -95,9 +93,7 @@ struct FTPBrowser: View {
                 Button { Task { await load() } } label: { Label("تحديث", systemImage: "arrow.clockwise") }
             } label: { Image(systemName: "ellipsis.circle") }
         }
-        .fileImporter(isPresented: $uploading, allowedContentTypes: [.data], allowsMultipleSelection: true) { r in
-            if case .success(let us) = r { upload(us) }
-        }
+        .docPicker(isPresented: $uploading, multiple: true) { upload($0) }
         .alert("إعادة تسمية", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("الاسم", text: $newName)
             Button("حفظ") { if let e = renaming { rename(e, newName) } }

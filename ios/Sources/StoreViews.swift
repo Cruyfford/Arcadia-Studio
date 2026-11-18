@@ -37,9 +37,7 @@ struct StoreHome: View {
                     } label: { Image(systemName: "ellipsis.circle") }
                 }
             }
-            .fileImporter(isPresented: $importing, allowedContentTypes: [.arcadia, .json, .zip, .data]) { r in
-                if case .success(let u) = r { app.open(u) }
-            }
+            .docPicker(isPresented: $importing) { app.open($0[0]) }
             .sheet(isPresented: $history) { HistoryView() }
             .fullScreenCover(isPresented: $app.showXMB) { if let s = app.store { XMBPreview(store: s) } }
         }

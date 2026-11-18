@@ -220,9 +220,7 @@ struct PkgViewerView: View {
                     }
                 } label: { Image(systemName: "ellipsis.circle") }
             }
-            .fileImporter(isPresented: $picking, allowedContentTypes: [.data]) { r in
-                if case .success(let u) = r { open(u) }
-            }
+            .docPicker(isPresented: $picking) { open($0[0]) }
             .sheet(item: Binding(get: { share.map { ShareItem(url: $0) } }, set: { share = $0?.url })) { ShareSheet(url: $0.url) }
         }
     }
@@ -240,7 +238,10 @@ struct PkgViewerView: View {
             let local = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("PKG")
             try? FileManager.default.createDirectory(at: local, withIntermediateDirectories: true)
             let dst = local.appendingPathComponent(u.lastPathComponent)
-            if u.path != dst.path { try? FileManager.default.removeItem(at: dst); try FileManager.default.copyItem(at: u, to: dst) }
+            if u.path != dst.path {
+                try? FileManager.default.removeItem(at: dst)
+                if (try? FileManager.default.moveItem(at: u, to: dst)) == nil { try FileManager.default.copyItem(at: u, to: dst) }
+            }
             let r = try PkgReader(dst)
             reader = r; localURL = dst
             sfo = SFO.parse(r.readFile("PARAM.SFO"))
