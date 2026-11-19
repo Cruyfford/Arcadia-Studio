@@ -5,16 +5,15 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe hldtux/ps3dev
+      - name: Headers
         run: |
-          docker pull hldtux/ps3dev:latest
           docker run --rm hldtux/ps3dev:latest bash -lc '
-            echo PS3DEV=$PS3DEV PSL1GHT=$PSL1GHT; which ppu-gcc; ppu-gcc --version | head -1
-            ls $PS3DEV; ls $PS3DEV/bin | head -50
-            ls $PS3DEV/ppu/lib | head -80; ls $PSL1GHT/ppu/lib 2>/dev/null | head -80
-            ls $PSL1GHT/ppu/include | head -80
-            find / -name "pkg.py" -path "*ps3*" 2>/dev/null | head; find / -name "tiny3d*" 2>/dev/null | head -3
-            find / -name "ppu_rules" 2>/dev/null | head -3; find / -iname "*libpngdec*" 2>/dev/null | head
-            find / -iname "libpng*.a" 2>/dev/null | head; find / -iname "libfreetype*" 2>/dev/null | head
-            python --version; python2 --version; python3 --version
+            cd $PS3DEV
+            echo "=== tiny3d.h"; grep -E "^(int|void|u32|float|void \*|u8|s32|unsigned|typedef|#define TINY3D|extern)" portlibs/ppu/include/tiny3d.h | head -150
+            echo "=== pngdec.h"; cat ppu/include/pngdec/pngdec.h | head -80
+            echo "=== ppu_rules"; cat ppu_rules
+            echo "=== portlibs libs"; ls portlibs/ppu/lib
+            echo "=== io/pad.h"; grep -n "BTN_\|ioPad" ppu/include/io/pad.h | head -60
+            echo "=== sysutil"; grep -n "SYSUTIL_EXIT\|sysUtilRegisterCallback\|sysUtilCheckCallback" -r ppu/include/sysutil/*.h | head
+            find / -path /proc -prune -o -name "*.c" -path "*tiny3d*" -print 2>/dev/null | head -20
           '
