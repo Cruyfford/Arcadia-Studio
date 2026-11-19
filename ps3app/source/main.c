@@ -144,21 +144,26 @@ static Tex *get_image(ImgSlot *slots, int count, const char *ps3) {
 
 /* ------------------------------------------------------------------ text (FreeType glyph atlas) */
 #define GLYPH_PX 32
-#define ATLAS 1024
+#define ATLAS 2048
+#define ATLAS_H 1024
 typedef struct { u32 cp; short x, y, w, h, left, top, adv; } Glyph;
 static FT_Library ft; static FT_Face face; static int font_ok;
 static Tex atlas; static int ax = 1, ay = 1, arow = 0;
 static Glyph glyphs[2048]; static int nglyphs;
+static u16 gmap[0x10000];           /* codepoint -> glyph index + 1 */
+static int atlas_locked;            /* after preload, no more writes to the atlas while the GPU uses it */
 
 static Glyph *glyph(u32 cp) {
-    for (int i = 0; i < nglyphs; i++) if (glyphs[i].cp == cp) return &glyphs[i];
-    if (!font_ok || nglyphs >= 2048) return NULL;
+    if (cp < 0x10000 && gmap[cp]) return &glyphs[gmap[cp] - 1];
+    if (cp >= 0x10000) return NULL;
+    if (!font_ok || nglyphs >= 2048 || atlas_locked) return NULL;
+    gmap[cp] = nglyphs + 1;
     Glyph *g = &glyphs[nglyphs]; memset(g, 0, sizeof(*g)); g->cp = cp;
     FT_UInt gi = FT_Get_Char_Index(face, cp);
     if (!gi || FT_Load_Glyph(face, gi, FT_LOAD_RENDER)) { g->adv = GLYPH_PX / 3; nglyphs++; return g; }
     FT_GlyphSlot s = face->glyph; FT_Bitmap *b = &s->bitmap;
     if (ax + (int)b->width + 2 > ATLAS) { ax = 1; ay += arow + 2; arow = 0; }
-    if (ay + (int)b->rows + 2 > ATLAS) { g->adv = s->advance.x >> 6; nglyphs++; return g; }
+    if (ay + (int)b->rows + 2 > ATLAS_H) { g->adv = s->advance.x >> 6; nglyphs++; return g; }
     u32 *dst = (u32 *)atlas.mem;
     for (int y = 0; y < (int)b->rows; y++)
         for (int x = 0; x < (int)b->width; x++) {
@@ -169,6 +174,16 @@ static Glyph *glyph(u32 cp) {
     ax += b->width + 2; if ((int)b->rows > arow) arow = b->rows;
     nglyphs++;
     return g;
+}
+
+/* render every glyph the store can use once, before the first frame */
+static void preload_glyphs(void) {
+    static const u32 ranges[][2] = { {0x20, 0x7E}, {0xA0, 0xFF}, {0x2010, 0x2027}, {0x2190, 0x2193},
+        {0x0600, 0x06FF}, {0xFB50, 0xFBFF}, {0xFE70, 0xFEFF}, {0x0660, 0x0669} };
+    for (unsigned r = 0; r < sizeof(ranges) / sizeof(ranges[0]); r++)
+        for (u32 c = ranges[r][0]; c <= ranges[r][1]; c++)
+            if (FT_Get_Char_Index(face, c)) glyph(c);
+    atlas_locked = 1;
 }
 
 static u32 utf8_next(const char **p) {
@@ -190,7 +205,7 @@ static float text_width(const char *s, float size) {
 static void draw_text(const char *s, float x, float y, float size, u32 color, float max_w) {
     if (!s) return;
     float sc = size / GLYPH_PX, pen = x;
-    tiny3d_SetTexture(0, atlas.off, ATLAS, ATLAS, ATLAS * 4, TINY3D_TEX_FORMAT_A8R8G8B8, TEXTURE_LINEAR);
+    tiny3d_SetTexture(0, atlas.off, ATLAS, ATLAS_H, ATLAS * 4, TINY3D_TEX_FORMAT_A8R8G8B8, TEXTURE_LINEAR);
     while (*s) {
         u32 cp = utf8_next(&s);
         if (cp == '\n') break;
@@ -199,7 +214,7 @@ static void draw_text(const char *s, float x, float y, float size, u32 color, fl
         if (max_w > 0 && pen + g->adv * sc > x + max_w) break;
         if (g->w && g->h) {
             float gx = pen + g->left * sc, gy = y - g->top * sc, gw = g->w * sc, gh = g->h * sc;
-            float u0 = (float)g->x / ATLAS, v0 = (float)g->y / ATLAS, u1 = (float)(g->x + g->w) / ATLAS, v1 = (float)(g->y + g->h) / ATLAS;
+            float u0 = (float)g->x / ATLAS, v0 = (float)g->y / ATLAS_H, u1 = (float)(g->x + g->w) / ATLAS, v1 = (float)(g->y + g->h) / ATLAS_H;
             tiny3d_SetPolygon(TINY3D_QUADS);
             tiny3d_VertexPos(gx, gy, 65535); tiny3d_VertexColor(color); tiny3d_VertexTexture(u0, v0);
             tiny3d_VertexPos(gx + gw, gy, 65535); tiny3d_VertexColor(color); tiny3d_VertexTexture(u1, v0);
@@ -521,12 +536,13 @@ int main(int argc, const char *argv[]) {
 
     tex_size = 40 * 1024 * 1024;
     tex_pool = tiny3d_AllocTexture(tex_size); tex_used = 0;
-    tex_make(&atlas, ATLAS, ATLAS);
-    if (atlas.mem) memset(atlas.mem, 0, ATLAS * ATLAS * 4);
+    tex_make(&atlas, ATLAS, ATLAS_H);
+    if (atlas.mem) memset(atlas.mem, 0, ATLAS * ATLAS_H * 4);
     for (int i = 0; i < ICON_SLOTS; i++) tex_make(&icons[i].t, 320, 176);
     for (int i = 0; i < BG_SLOTS; i++) tex_make(&bgs[i].t, 960, 540);
 
-    font_ok = !FT_Init_FreeType(&ft) && !FT_New_Face(ft, APPDIR "USRDIR/font.ttf", 0, &face) && !FT_Set_Pixel_Sizes(face, 0, GLYPH_PX);
+    font_ok = !FT_Init_FreeType(&ft) && !FT_New_Face(ft, APPDIR "USRDIR/font.ttf", 0, &face) && !FT_Set_Pixel_Sizes(face, 0, GLYPH_PX) && atlas.mem;
+    if (font_ok) preload_glyphs();
 
     if (load_level(&stack[0], ROOT_XML, ROOT_VIEW)) { depth = 0; stack[0].pic = strdup(STORE "PIC1.PNG"); }
     else free_level(&stack[0]);
