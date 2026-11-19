@@ -5,7 +5,7 @@ endif
 
 include $(PSL1GHT)/ppu_rules
 
-TARGET    := $(notdir $(CURDIR))
+TARGET    := ARCADIA
 BUILD     := build
 SOURCES   := source
 DATA      := data
