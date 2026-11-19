@@ -22,6 +22,8 @@
 #include <sysmodule/sysmodule.h>
 #include <pngdec/pngdec.h>
 #include <tiny3d.h>
+#include <sys/stat.h>
+#include <curl/curl.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
@@ -433,13 +435,118 @@ static void webman_poll(void) {
     if (wm_result) { show_toast(wm_result == 1 ? wm_ok_msg : S_NOWM); wm_result = 0; }
 }
 
+/* ------------------------------------------------------------------ built-in downloader (no webMAN needed) */
+#define PKG_DIR "/dev_hdd0/packages"
+static volatile int dl_active, dl_cancel, dl_state;   /* state: 0 none, 1 done, 2 fail, 3 canceled */
+static volatile double dl_now, dl_total, dl_speed;
+static char dl_url[2048], dl_name[256], dl_title[256], dl_final[512], dl_part[512];
+static sys_ppu_thread_t dl_thread;
+
+static size_t dl_write(void *p, size_t sz, size_t n, void *f) { return fwrite(p, sz, n, (FILE *)f); }
+
+static int dl_progress(void *u, curl_off_t total, curl_off_t now, curl_off_t ut, curl_off_t un) {
+    dl_total = (double)total; dl_now = (double)now;
+    return dl_cancel ? 1 : 0;
+}
+
+static void dl_entry(void *arg) {
+    int state = 2;
+    FILE *f = fopen(dl_part, "wb");
+    CURL *c = f ? curl_easy_init() : NULL;
+    if (c) {
+        static char fbuf[1 << 20]; setvbuf(f, fbuf, _IOFBF, sizeof(fbuf));
+        curl_easy_setopt(c, CURLOPT_URL, dl_url);
+        curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
+        curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+        curl_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (PLAYSTATION 3; 4.92)");
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, dl_progress);
+        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
+        curl_easy_setopt(c, CURLOPT_BUFFERSIZE, 512L * 1024);
+        CURLcode r = curl_easy_perform(c);
+        long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        curl_easy_cleanup(c);
+        fclose(f); f = NULL;
+        if (r == CURLE_OK && code < 400) { unlink(dl_final); state = rename(dl_part, dl_final) == 0 ? 1 : 2; }
+        else state = dl_cancel ? 3 : (r == CURLE_WRITE_ERROR ? 4 : 2);
+    }
+    if (f) fclose(f);
+    if (state != 1) unlink(dl_part);
+    dl_state = state; dl_active = 0;
+    sysThreadExit(0);
+}
+
+static void url_filename(const char *url, char *out, int n) {
+    const char *q = strchr(url, '?'); int len = q ? (int)(q - url) : (int)strlen(url);
+    const char *b = url + len; while (b > url && b[-1] != '/') b--;
+    int j = 0;
+    for (const char *c = b; c < url + len && j < n - 5; c++) {
+        char ch = *c;
+        if (ch == '%' && c + 2 < url + len) { char h[3] = { c[1], c[2], 0 }; ch = (char)strtol(h, NULL, 16); c += 2; }
+        if (ch == '/' || ch == '\\' || ch == ':' || ch == '"' || ch == '*' || ch == '?' || ch == '<' || ch == '>' || ch == '|') ch = '_';
+        out[j++] = ch;
+    }
+    out[j] = 0;
+    if (!j) snprintf(out, n, "arcadia_download");
+    if (j < 4 || strcasecmp(out + strlen(out) - 4, ".pkg")) strncat(out, ".pkg", n - strlen(out) - 1);
+}
+
+static void start_download(const char *url, const char *title) {
+    if (dl_active) return;
+    snprintf(dl_url, sizeof(dl_url), "%s", url);
+    for (char *c = dl_url; *c; c++) if (*c == ' ') { memmove(c + 3, c + 1, strlen(c + 1) + 1); c[0] = '%'; c[1] = '2'; c[2] = '0'; }
+    url_filename(url, dl_name, sizeof(dl_name));
+    snprintf(dl_title, sizeof(dl_title), "%s", title ? title : dl_name);
+    mkdir(PKG_DIR, 0777);
+    snprintf(dl_final, sizeof(dl_final), PKG_DIR "/%s", dl_name);
+    snprintf(dl_part, sizeof(dl_part), PKG_DIR "/%s.part", dl_name);
+    dl_now = dl_total = dl_speed = 0; dl_cancel = 0; dl_state = 0; dl_active = 1;
+    if (sysThreadCreate(&dl_thread, dl_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) { dl_active = 0; show_toast(S_FAIL); }
+}
+
+static void dl_poll(void) {
+    static double last_now; static u32 last_frame;
+    if (dl_active && frame_no - last_frame >= 60) {
+        double d = dl_now - last_now; dl_speed = d > 0 ? d * 60.0 / (frame_no - last_frame) : dl_speed * 0.5;
+        last_now = dl_now; last_frame = frame_no;
+    }
+    if (!dl_active && dl_state) {
+        show_toast(dl_state == 1 ? S_DONE : dl_state == 3 ? S_CANCELED : dl_state == 4 ? S_SPACE : S_FAIL);
+        dl_state = 0; last_now = 0;
+    }
+}
+
+static void draw_download(void) {
+    if (!dl_active) return;
+    draw_quad(0, 0, SW, SH, 0x000000A0);
+    float x = 144, y = 176, w = 560, h = 160;
+    draw_quad(x, y, w, h, 0x141A3CF0); draw_quad(x, y, w, 3, 0x7C3AEDFF);
+    draw_text_shadow(S_DLING, x + 24, y + 36, 16, 0xFFD166FF, 0);
+    draw_text_shadow(dl_title, x + 24, y + 66, 15, 0xFFFFFFFF, w - 48);
+    float pct = dl_total > 0 ? (float)(dl_now / dl_total) : 0;
+    draw_quad(x + 24, y + 86, w - 48, 14, 0xFFFFFF22);
+    draw_grad(x + 24, y + 86, (w - 48) * pct, 14, 0x9F67FFFF, 0x6D28D9FF);
+    char t[128];
+    if (dl_total > 0) snprintf(t, sizeof(t), "%d%%   %.1f / %.1f MB   %.2f MB/s", (int)(pct * 100), dl_now / 1048576.0, dl_total / 1048576.0, dl_speed / 1048576.0);
+    else snprintf(t, sizeof(t), "%.1f MB   %.2f MB/s", dl_now / 1048576.0, dl_speed / 1048576.0);
+    draw_text(t, x + 24, y + 126, 13, 0xE6E6F0FF, 0);
+    draw_text(S_CANCEL, x + w - 24 - text_width(S_CANCEL, 13), y + 126, 13, 0xFFFFFFAA, 0);
+    draw_text(dl_name, x + 24, y + 148, 10, 0xFFFFFF77, w - 48);
+}
+
+static const char *cur_title;
 static void do_action(Node *n) {
     if (n->action && !strncmp(n->action, "http://127.0.0.1", 16) && !strstr(n->action, "download.ps3")) {
         webman_async(n->action + 16, S_CMD); return;     /* store commands (font, themes...) */
     }
     if (!n->link) { show_toast(S_NOLINK); return; }
-    char path[2048]; snprintf(path, sizeof(path), "/download.ps3?to=/dev_hdd0/packages&url=%s", n->link);
-    webman_async(path, S_SENT);
+    start_download(n->link, cur_title && strcmp(n->title, n->key) == 0 ? cur_title : n->title);
 }
 
 static void activate(Node *n) {
@@ -447,6 +554,7 @@ static void activate(Node *n) {
         if (depth + 1 >= MAX_DEPTH) return;
         Level *L = &stack[depth + 1];
         if (load_level(L, n->tfile, n->tview)) {
+            cur_title = n->title;
             if (L->n == 1 && !L->items[0].folder) { do_action(&L->items[0]); free_level(L); return; }
             L->title = strdup(n->title); L->pic = n->pic ? strdup(n->pic) : (stack[depth].pic ? strdup(stack[depth].pic) : NULL);
             depth++;
@@ -455,6 +563,7 @@ static void activate(Node *n) {
         }
         return;
     }
+    cur_title = NULL;
     do_action(n);
 }
 
@@ -568,6 +677,7 @@ int main(int argc, const char *argv[]) {
     ioPadInit(7);
     sysModuleLoad(SYSMODULE_PNGDEC);
     netInitialize();
+    curl_global_init(CURL_GLOBAL_ALL);
     sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, sys_cb, NULL);
 
     tex_size = 40 * 1024 * 1024;
@@ -587,8 +697,10 @@ int main(int argc, const char *argv[]) {
         frame_no++;
         sysUtilCheckCallback();
         webman_poll();
+        dl_poll();
         read_pad();
-        if (depth >= 0) {
+        if (dl_active) { if (pressed(K_O)) dl_cancel = 1; }
+        else if (depth >= 0) {
             Level *L = &stack[depth];
             if (L->n) {
                 if (pressed(K_DOWN)) L->sel = (L->sel + 1) % L->n;
@@ -602,7 +714,7 @@ int main(int argc, const char *argv[]) {
                 else running = 0;
             }
         } else if (pressed(K_O) || pressed(K_X)) running = 0;
-        if (pressed(K_START)) running = 0;
+        if (!dl_active && pressed(K_START)) running = 0;
 
         tiny3d_Clear(0xFF000000, TINY3D_CLEAR_ALL);
         tiny3d_AlphaTest(1, 0x01, TINY3D_ALPHA_FUNC_GEQUAL);
@@ -611,10 +723,13 @@ int main(int argc, const char *argv[]) {
                          TINY3D_BLEND_RGB_FUNC_ADD | TINY3D_BLEND_ALPHA_FUNC_ADD);
         tiny3d_Project2D();
         draw_screen();
+        draw_download();
         tiny3d_Flip();
     }
 
-    for (int i = 0; wm_busy && i < 300; i++) usleep(20000);
+    dl_cancel = 1;
+    for (int i = 0; (wm_busy || dl_active) && i < 300; i++) usleep(20000);
+    curl_global_cleanup();
     while (depth >= 0) { free_level(&stack[depth]); depth--; }
     if (font_ok) { FT_Done_Face(face); FT_Done_FreeType(ft); }
     netDeinitialize();
