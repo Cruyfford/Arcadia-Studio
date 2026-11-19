@@ -11,6 +11,8 @@
 #include <malloc.h>
 #include <math.h>
 #include <sys/process.h>
+#include <sys/thread.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -385,9 +387,17 @@ static void free_level(Level *L) {
 static char toast[300]; static int toast_frames;
 static void show_toast(const char *s) { snprintf(toast, sizeof(toast), "%s", s); toast_frames = 60 * 5; }
 
-static int webman_get(const char *path) {
+/* the request runs on its own thread so the UI never freezes */
+static volatile int wm_busy, wm_result;      /* result: 0 none, 1 ok, 2 fail */
+static char wm_path[2048]; static const char *wm_ok_msg;
+static sys_ppu_thread_t wm_thread;
+
+static int webman_get_blocking(const char *path) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return 0;
+    struct timeval tv = { 4, 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET; a.sin_port = htons(80); a.sin_addr.s_addr = inet_addr("127.0.0.1");
     if (connect(s, (struct sockaddr *)&a, sizeof(a)) < 0) { close(s); return 0; }
@@ -396,11 +406,40 @@ static int webman_get(const char *path) {
         if (*c == ' ') { enc[j++] = '%'; enc[j++] = '2'; enc[j++] = '0'; } else enc[j++] = *c;
     }
     enc[j] = 0;
-    int n = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nUser-Agent: ArcadiaPS3\r\n\r\n", enc);
-    send(s, req, n, 0);
-    char buf[256]; recv(s, buf, sizeof(buf), 0);
+    int n = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nUser-Agent: ArcadiaPS3\r\nConnection: close\r\n\r\n", enc);
+    int ok = send(s, req, n, 0) == n;
+    char buf[64]; if (ok) recv(s, buf, sizeof(buf), 0);   /* bounded by the timeout */
     close(s);
-    return 1;
+    return ok;
+}
+
+static void wm_entry(void *arg) {
+    wm_result = webman_get_blocking(wm_path) ? 1 : 2;
+    wm_busy = 0;
+    sysThreadExit(0);
+}
+
+static void webman_async(const char *path, const char *ok_msg) {
+    if (wm_busy) { show_toast(S_WAIT); return; }
+    snprintf(wm_path, sizeof(wm_path), "%s", path); wm_ok_msg = ok_msg;
+    wm_busy = 1; wm_result = 0;
+    if (sysThreadCreate(&wm_thread, wm_entry, NULL, 1500, 0x8000, 0, "wm_get") != 0) {
+        wm_busy = 0; show_toast(S_NOWM); return;
+    }
+    show_toast(S_WAIT);
+}
+
+static void webman_poll(void) {
+    if (wm_result) { show_toast(wm_result == 1 ? wm_ok_msg : S_NOWM); wm_result = 0; }
+}
+
+static void do_action(Node *n) {
+    if (n->action && !strncmp(n->action, "http://127.0.0.1", 16) && !strstr(n->action, "download.ps3")) {
+        webman_async(n->action + 16, S_CMD); return;     /* store commands (font, themes...) */
+    }
+    if (!n->link) { show_toast(S_NOLINK); return; }
+    char path[2048]; snprintf(path, sizeof(path), "/download.ps3?to=/dev_hdd0/packages&url=%s", n->link);
+    webman_async(path, S_SENT);
 }
 
 static void activate(Node *n) {
@@ -408,6 +447,7 @@ static void activate(Node *n) {
         if (depth + 1 >= MAX_DEPTH) return;
         Level *L = &stack[depth + 1];
         if (load_level(L, n->tfile, n->tview)) {
+            if (L->n == 1 && !L->items[0].folder) { do_action(&L->items[0]); free_level(L); return; }
             L->title = strdup(n->title); L->pic = n->pic ? strdup(n->pic) : (stack[depth].pic ? strdup(stack[depth].pic) : NULL);
             depth++;
         } else {
@@ -415,12 +455,7 @@ static void activate(Node *n) {
         }
         return;
     }
-    if (n->action && !strncmp(n->action, "http://127.0.0.1", 16) && !strstr(n->action, "download.ps3")) {
-        show_toast(webman_get(n->action + 16) ? S_CMD : S_NOWM); return;     /* store commands (font, themes...) */
-    }
-    if (!n->link) { show_toast(S_NOLINK); return; }
-    char path[2048]; snprintf(path, sizeof(path), "/download.ps3?to=/dev_hdd0/packages&url=%s", n->link);
-    show_toast(webman_get(path) ? S_SENT : S_NOWM);
+    do_action(n);
 }
 
 /* ------------------------------------------------------------------ system */
@@ -497,7 +532,7 @@ static void draw_screen(void) {
         else draw_quad(30, y + 8, 80, rh - 24, 0xFFFFFF22);
         draw_text_shadow(n->title, 122, y + (n->info ? 21 : 30), s ? 17 : 15, s ? 0xFFFFFFFF : 0xE6E6F0FF, 390);
         if (n->info) draw_text(n->info, 122, y + 40, 11.5f, 0xC9D3FFFF, 390);
-        if (n->folder) draw_text(">", 500, y + 30, 16, 0xFFFFFF99, 0);
+        if (n->folder && !strstr(n->tview, "_link")) draw_text(">", 500, y + 30, 16, 0xFFFFFF99, 0);
     }
     /* scroll bar */
     if (L->n > ROWS) {
@@ -511,7 +546,8 @@ static void draw_screen(void) {
         if (ic) draw_image_fit(ic, 560, 82, 256, 144, 0xFFFFFFFF);
         draw_text_shadow(cur->title, 560, 252, 15, 0xFFFFFFFF, 256);
         if (cur->info) draw_text(cur->info, 560, 276, 12, 0xC9D3FFFF, 256);
-        draw_text(cur->folder ? S_OPEN : (cur->link || cur->action ? S_DL : S_NOLINK), 560, 380, 14, 0xFFD166FF, 256);
+        int is_dl = cur->folder && strstr(cur->tview, "_link");
+        draw_text(cur->folder && !is_dl ? S_OPEN : (cur->link || cur->action ? S_DL : S_NOLINK), 560, 380, 14, 0xFFD166FF, 256);
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d / %d", L->sel + 1, L->n);
         draw_text(cnt, 760, 380, 12, 0xFFFFFF99, 0);
     }
@@ -550,6 +586,7 @@ int main(int argc, const char *argv[]) {
     while (running) {
         frame_no++;
         sysUtilCheckCallback();
+        webman_poll();
         read_pad();
         if (depth >= 0) {
             Level *L = &stack[depth];
@@ -577,6 +614,7 @@ int main(int argc, const char *argv[]) {
         tiny3d_Flip();
     }
 
+    for (int i = 0; wm_busy && i < 300; i++) usleep(20000);
     while (depth >= 0) { free_level(&stack[depth]); depth--; }
     if (font_ok) { FT_Done_Face(face); FT_Done_FreeType(ft); }
     netDeinitialize();

@@ -12,3 +12,4 @@
 #define S_OPEN "ﺢﺘﻓ X"
 #define S_ITEMS "ﺮﺼﻨﻋ"
 #define S_EXIT "ﺝﻭﺮﺧ O"
+#define S_WAIT "...webMAN ﻰﻟﺇ ﻝﺎﺳﺭﻹﺍ ﺭﺎﺟ"
