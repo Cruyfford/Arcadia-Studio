@@ -1,0 +1,20 @@
+name: PS3 toolchain probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe hldtux/ps3dev
+        run: |
+          docker pull hldtux/ps3dev:latest
+          docker run --rm hldtux/ps3dev:latest bash -lc '
+            echo PS3DEV=$PS3DEV PSL1GHT=$PSL1GHT; which ppu-gcc; ppu-gcc --version | head -1
+            ls $PS3DEV; ls $PS3DEV/bin | head -50
+            ls $PS3DEV/ppu/lib | head -80; ls $PSL1GHT/ppu/lib 2>/dev/null | head -80
+            ls $PSL1GHT/ppu/include | head -80
+            find / -name "pkg.py" -path "*ps3*" 2>/dev/null | head; find / -name "tiny3d*" 2>/dev/null | head -3
+            find / -name "ppu_rules" 2>/dev/null | head -3; find / -iname "*libpngdec*" 2>/dev/null | head
+            find / -iname "libpng*.a" 2>/dev/null | head; find / -iname "libfreetype*" 2>/dev/null | head
+            python --version; python2 --version; python3 --version
+          '
