@@ -1,0 +1,1 @@
+Auto RAP build from source. Place rapdb.bin generated from your own RAP files at /dev_usb000/rapdb.bin, /dev_usb001/rapdb.bin, /dev_hdd0/rapdb.bin or /dev_hdd0/game/ARCD00001/USRDIR/rapdb.bin. This GitHub-built package does NOT embed your personal RAP library. Exact full Content ID match; does not overwrite existing conflicting RAP.

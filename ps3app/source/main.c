@@ -29,12 +29,15 @@
 
 #include "ui_strings.h"
 #include "pkginst.h"
+#include "rapinst.h"
 
 SYS_PROCESS_PARAM(1001, 0x100000);
 
 #define STORE      "/dev_hdd0/game/VIDESTORE/"
 #define STORE_PS3  "/dev_hdd0/game/VIDESTORE/"
 #define APPDIR     "/dev_hdd0/game/ARCD00001/"
+#define RAP_DB     APPDIR "USRDIR/rapdb.bin"
+#define RAP_EXDATA "/dev_hdd0/exdata"
 #define ROOT_XML   STORE "USRDIR/VIDEOGAMESSCZ_xmb.xml"
 #define ROOT_VIEW  "VIDEOGAMESSCZ_xmb_main"
 #define FOLDER_CLS "type:x-xmb/folder-pixmap"
@@ -438,6 +441,8 @@ static void webman_poll(void) {
 
 /* ------------------------------------------------------------------ built-in downloader (no webMAN needed) */
 #define PKG_DIR "/dev_hdd0/packages"
+static volatile int dl_rap_state;
+static char dl_rap_err[160];
 static volatile int dl_active, dl_cancel, dl_state, dl_phase;   /* phase 0 download, 1 install */   /* state: 0 none, 1 done, 2 fail, 3 canceled */
 static volatile double dl_now, dl_total, dl_speed;
 static char dl_err[160]; static char dl_icon[512];
@@ -483,7 +488,10 @@ static void dl_entry(void *arg) {
                 /* install right here, inside the app */
                 dl_phase = 1; dl_now = 0; dl_total = 0;
                 char dest[512];
-                if (pkg_install(dl_final, "/dev_hdd0", dest, sizeof(dest), dl_err, sizeof(dl_err), &dl_now, &dl_total)) { unlink(dl_final); state = 1; }
+                if (pkg_install(dl_final, "/dev_hdd0", dest, sizeof(dest), dl_err, sizeof(dl_err), &dl_now, &dl_total)) {
+                    dl_rap_state = rap_install_pkg(dl_final, RAP_DB, RAP_EXDATA, dl_rap_err, sizeof(dl_rap_err));
+                    unlink(dl_final); state = 1;
+                }
                 else state = 5;
             }
         }
@@ -525,7 +533,8 @@ static void start_download(const char *url, const char *title) {
     mkdir(PKG_DIR, 0777);
     snprintf(dl_final, sizeof(dl_final), PKG_DIR "/%s", dl_name);
     snprintf(dl_part, sizeof(dl_part), PKG_DIR "/%s.part", dl_name);
-    dl_now = dl_total = dl_speed = 0; dl_cancel = 0; dl_state = 0; dl_phase = 0; dl_active = 1;
+    dl_now = dl_total = dl_speed = 0; dl_cancel = 0; dl_state = 0; dl_phase = 0;
+    dl_rap_state = RAP_NOT_FOUND; dl_rap_err[0] = 0; dl_active = 1;
     if (sysThreadCreate(&dl_thread, dl_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) { dl_active = 0; show_toast(S_FAIL); }
 }
 
@@ -537,7 +546,7 @@ static void dl_poll(void) {
     }
     if (!dl_active && dl_state) {
         if (dl_state == 2) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_FAIL); show_toast(t); }
-        else if (dl_state == 1) show_toast(S_INSTALLED);
+        else if (dl_state == 1) show_toast(dl_rap_state == RAP_INSTALLED ? S_RAP_INSTALLED : dl_rap_state == RAP_ALREADY_PRESENT ? S_RAP_ALREADY : dl_rap_state == RAP_NOT_FOUND ? S_RAP_NOT_FOUND : dl_rap_state == RAP_DB_MISSING ? S_RAP_DB_MISSING : S_RAP_FAILED);
         else if (dl_state == 5) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_BADPKG); show_toast(t); }
         else show_toast(dl_state == 1 ? S_DONE : dl_state == 3 ? S_CANCELED : S_SPACE);
         dl_state = 0; last_now = 0;

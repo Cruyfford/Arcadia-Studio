@@ -1,4 +1,4 @@
-name: PS3 App
+name: PS3 App Auto RAP build
 on:
   push:
     paths: ['ps3app/**', '.github/workflows/ps3app.yml']
@@ -18,8 +18,3 @@ jobs:
           cp ps3app/ARCADIA.pkg ARCADIA_App.pkg
       - uses: actions/upload-artifact@v4
         with: { name: ARCADIA_App, path: ARCADIA_App.pkg }
-      - name: Release
-        env: { GH_TOKEN: '${{ github.token }}' }
-        run: |
-          gh release delete ps3app-latest -y --cleanup-tag || true
-          gh release create ps3app-latest ARCADIA_App.pkg -t "ARCADIA PS3 App" -n "Built from ${{ github.sha }}"

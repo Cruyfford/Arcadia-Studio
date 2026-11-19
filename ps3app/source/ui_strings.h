@@ -25,3 +25,9 @@
 #define S_INSTALLED "ﺏﺎﻌﻟﻷﺍ ﺔﻤﺋﺎﻗ ﻲﻓ ﺔﺒﻌﻠﻟﺍ ﺪﺠﺘﺳ ،ﺡﺎﺠﻨﺑ ﺖﻴﺒﺜﺘﻟﺍ ﻢﺗ"
 #define S_BADPKG "packages ﺪﻠﺠﻣ ﻲﻓ ﻅﻮﻔﺤﻣ ﻒﻠﻤﻟﺍ ،ﺖﻴﺒﺜﺘﻟﺍ ﻞﺸﻓ"
 #define S_NOCANCEL "ﺖﻴﺒﺜﺘﻟﺍ ﺀﺎﻨﺛﺃ ﺀﺎﻐﻟﻹﺍ ﻦﻜﻤﻳ ﻻ"
+
+#define S_RAP_INSTALLED "PKG installed + matching RAP copied"
+#define S_RAP_ALREADY "PKG installed - matching RAP already present"
+#define S_RAP_NOT_FOUND "PKG installed - no exact RAP match"
+#define S_RAP_DB_MISSING "PKG installed - RAP library missing (use USB rapdb.bin)"
+#define S_RAP_FAILED "PKG installed - RAP failed"
