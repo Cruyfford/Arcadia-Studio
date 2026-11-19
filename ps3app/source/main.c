@@ -439,6 +439,7 @@ static void webman_poll(void) {
 #define PKG_DIR "/dev_hdd0/packages"
 static volatile int dl_active, dl_cancel, dl_state;   /* state: 0 none, 1 done, 2 fail, 3 canceled */
 static volatile double dl_now, dl_total, dl_speed;
+static char dl_err[160];
 static char dl_url[2048], dl_name[256], dl_title[256], dl_final[512], dl_part[512];
 static sys_ppu_thread_t dl_thread;
 
@@ -452,6 +453,7 @@ static int dl_progress(void *u, curl_off_t total, curl_off_t now, curl_off_t ut,
 static void dl_entry(void *arg) {
     int state = 2;
     FILE *f = fopen(dl_part, "wb");
+    snprintf(dl_err, sizeof(dl_err), f ? "curl init" : "open " PKG_DIR " failed");
     CURL *c = f ? curl_easy_init() : NULL;
     if (c) {
         static char fbuf[1 << 20]; setvbuf(f, fbuf, _IOFBF, sizeof(fbuf));
@@ -474,7 +476,11 @@ static void dl_entry(void *arg) {
         curl_easy_cleanup(c);
         fclose(f); f = NULL;
         if (r == CURLE_OK && code < 400) { unlink(dl_final); state = rename(dl_part, dl_final) == 0 ? 1 : 2; }
-        else state = dl_cancel ? 3 : (r == CURLE_WRITE_ERROR ? 4 : 2);
+        else {
+            state = dl_cancel ? 3 : (r == CURLE_WRITE_ERROR ? 4 : 2);
+            if (r != CURLE_OK) snprintf(dl_err, sizeof(dl_err), "curl %d: %s", (int)r, curl_easy_strerror(r));
+            else snprintf(dl_err, sizeof(dl_err), "HTTP %ld", code);
+        }
     }
     if (f) fclose(f);
     if (state != 1) unlink(dl_part);
@@ -517,7 +523,8 @@ static void dl_poll(void) {
         last_now = dl_now; last_frame = frame_no;
     }
     if (!dl_active && dl_state) {
-        show_toast(dl_state == 1 ? S_DONE : dl_state == 3 ? S_CANCELED : dl_state == 4 ? S_SPACE : S_FAIL);
+        if (dl_state == 2) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_FAIL); show_toast(t); }
+        else show_toast(dl_state == 1 ? S_DONE : dl_state == 3 ? S_CANCELED : S_SPACE);
         dl_state = 0; last_now = 0;
     }
 }
@@ -656,7 +663,7 @@ static void draw_screen(void) {
         draw_text_shadow(cur->title, 560, 252, 15, 0xFFFFFFFF, 256);
         if (cur->info) draw_text(cur->info, 560, 276, 12, 0xC9D3FFFF, 256);
         int is_dl = cur->folder && strstr(cur->tview, "_link");
-        draw_text(cur->folder && !is_dl ? S_OPEN : (cur->link || cur->action ? S_DL : S_NOLINK), 560, 380, 14, 0xFFD166FF, 256);
+        draw_text(is_dl ? S_DL : cur->folder ? S_OPEN : (cur->link || cur->action ? S_DL : S_NOLINK), 560, 380, 14, 0xFFD166FF, 256);
         char cnt[32]; snprintf(cnt, sizeof(cnt), "%d / %d", L->sel + 1, L->n);
         draw_text(cnt, 760, 380, 12, 0xFFFFFF99, 0);
     }
