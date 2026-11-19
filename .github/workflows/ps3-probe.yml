@@ -8,11 +8,11 @@ jobs:
       - name: Headers
         run: |
           docker run --rm hldtux/ps3dev:latest bash -lc '
-            cd $PS3DEV
-            echo "=== enums"; sed -n "/typedef enum/,/}/p" portlibs/ppu/include/tiny3d.h | grep -v "^\s*//" | head -150
-            grep -n "TEXTURE_\|#define" portlibs/ppu/include/tiny3d.h | head -40
-            echo "=== pngdec tail"; sed -n 80,400p ppu/include/pngdec/pngdec.h | grep -n "pngData\|pngLoad\|bmp_out\|pitch\|width\|height" | head -30
-            echo "=== sysmodule"; grep -n "PNGDEC\|FREETYPE\|NET\b\|SYSUTIL_ID_PNG" ppu/include/sysmodule/sysmodule.h | head
-            echo "=== net"; grep -n "netInitialize\|netDeinitialize" -r ppu/include/net/*.h | head
-            echo "=== ft"; ls portlibs/ppu/include | head -60; ls portlibs/ppu/include/freetype2 2>/dev/null | head
+            cd $PS3DEV/portlibs/ppu
+            echo "=== libs"; ls lib | grep -iE "curl|ssl|tls|crypto|polar|mbed|^libz"
+            echo "=== pc"; cat lib/pkgconfig/libcurl.pc 2>/dev/null
+            echo "=== ver"; grep -E "LIBCURL_VERSION " include/curl/curlver.h
+            echo "=== inc"; ls include | grep -iE "ssl|tls|polar|mbed"
+            echo "=== thread"; grep -n "sysThreadCreate\|sysThreadExit" $PS3DEV/ppu/include/sys/thread.h | head
+            echo "=== ca"; ls $PS3DEV/portlibs/ppu/share 2>/dev/null | head
           '
