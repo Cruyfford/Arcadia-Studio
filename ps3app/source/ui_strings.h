@@ -1,0 +1,14 @@
+// generated: Arabic already joined and in display order (no RTL support on the renderer)
+#pragma once
+#define S_NOSTORE "ﻻﻭﺃ ARCADIA ﺔﻣﺰﺣ ﺖﺒﺛ — ﺖﺒﺜﻣ ﺮﻴﻏ ﺮﺠﺘﻤﻟﺍ"
+#define S_EMPTY "ﺎﻨﻫ ﺮﺻﺎﻨﻋ ﺪﺟﻮﺗ ﻻ"
+#define S_HINT "ﺔﺤﻔﺻ L1 / R1    ﻉﻮﺟﺭ O    ﻞﻳﺰﻨﺗ / ﺢﺘﻓ X"
+#define S_SENT "packages ﺪﻠﺠﻣ ﻲﻓ ﻩﺪﺠﺗ — webMAN ﺮﺒﻋ ﺔﻴﻔﻠﺨﻟﺍ ﻲﻓ ﻞﻳﺰﻨﺘﻟﺍ ﺃﺪﺑ"
+#define S_CMD "webMAN ﺮﺒﻋ ﺮﻣﻷﺍ ﺬﻴﻔﻨﺗ ﻢﺗ"
+#define S_NOWM "ﺔﻟﻭﺎﺤﻤﻟﺍ ﺪﻋﺃ ﻢﺛ ﻪﻠﻐﺷ — ﻞﻐﺸﻣ ﺮﻴﻏ webMAN"
+#define S_NOLINK "ﺮﺼﻨﻌﻟﺍ ﺍﺬﻬﻟ ﻞﻳﺰﻨﺗ ﻂﺑﺍﺭ ﺪﺟﻮﻳ ﻻ"
+#define S_APP "ﺎﻳﺩﺎﻛﺭﺃ"
+#define S_DL "ﻞﻳﺰﻨﺗ X"
+#define S_OPEN "ﺢﺘﻓ X"
+#define S_ITEMS "ﺮﺼﻨﻋ"
+#define S_EXIT "ﺝﻭﺮﺧ O"

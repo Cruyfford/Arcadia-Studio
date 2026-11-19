@@ -1,0 +1,25 @@
+name: PS3 App
+on:
+  push:
+    paths: ['ps3app/**', '.github/workflows/ps3app.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build PKG
+        run: |
+          docker run --rm -v $PWD/ps3app:/src -w /src hldtux/ps3dev:latest bash -lc 'export PS3DEV=/usr/local/ps3dev PSL1GHT=/usr/local/ps3dev; export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PATH; make pkg'
+          sudo chown -R $USER ps3app
+          ls -la ps3app
+          cp ps3app/ps3app.pkg ARCADIA_App.pkg
+      - uses: actions/upload-artifact@v4
+        with: { name: ARCADIA_App, path: ARCADIA_App.pkg }
+      - name: Release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          gh release delete ps3app-latest -y --cleanup-tag || true
+          gh release create ps3app-latest ARCADIA_App.pkg -t "ARCADIA PS3 App" -n "Built from ${{ github.sha }}"

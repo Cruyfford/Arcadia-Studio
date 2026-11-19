@@ -1,7 +1,7 @@
 name: Build Arcadia Studio (Windows EXE)
 on:
   push:
-    paths-ignore: ['ios/**', '.github/workflows/ios.yml']
+    paths-ignore: ['ios/**', '.github/workflows/ios.yml', 'ps3app/**', '.github/workflows/ps3app.yml', '.github/workflows/ps3-probe.yml']
   workflow_dispatch:
 permissions:
   contents: write
