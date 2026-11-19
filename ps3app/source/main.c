@@ -439,7 +439,7 @@ static void webman_poll(void) {
 #define PKG_DIR "/dev_hdd0/packages"
 static volatile int dl_active, dl_cancel, dl_state;   /* state: 0 none, 1 done, 2 fail, 3 canceled */
 static volatile double dl_now, dl_total, dl_speed;
-static char dl_err[160];
+static char dl_err[160]; static char dl_icon[512];
 static char dl_url[2048], dl_name[256], dl_title[256], dl_final[512], dl_part[512];
 static sys_ppu_thread_t dl_thread;
 
@@ -503,8 +503,10 @@ static void url_filename(const char *url, char *out, int n) {
     if (j < 4 || strcasecmp(out + strlen(out) - 4, ".pkg")) strncat(out, ".pkg", n - strlen(out) - 1);
 }
 
+static const char *cur_icon;
 static void start_download(const char *url, const char *title) {
     if (dl_active) return;
+    dl_icon[0] = 0; if (cur_icon) snprintf(dl_icon, sizeof(dl_icon), "%s", cur_icon);
     snprintf(dl_url, sizeof(dl_url), "%s", url);
     for (char *c = dl_url; *c; c++) if (*c == ' ') { memmove(c + 3, c + 1, strlen(c + 1) + 1); c[0] = '%'; c[1] = '2'; c[2] = '0'; }
     url_filename(url, dl_name, sizeof(dl_name));
@@ -516,6 +518,62 @@ static void start_download(const char *url, const char *title) {
     if (sysThreadCreate(&dl_thread, dl_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) { dl_active = 0; show_toast(S_FAIL); }
 }
 
+/* queue the downloaded pkg for the XMB installer: /dev_hdd0/vsh/game_pkg/<id>/ with d0/d1/f0.pdb + ICON_FILE
+   (Project Database records, see psdevwiki "Project_Database_(PDB)"; PS3 is big endian so values are written as-is) */
+#define INSTALL_DIR "/dev_hdd0/vsh/game_pkg"
+
+static void pdb_rec(FILE *f, u32 id, const void *data, u32 len) { fwrite(&id, 4, 1, f); fwrite(&len, 4, 1, f); fwrite(&len, 4, 1, f); fwrite(data, len, 1, f); }
+static void pdb_u8(FILE *f, u32 id, u8 v) { pdb_rec(f, id, &v, 1); }
+static void pdb_u32(FILE *f, u32 id, u32 v) { pdb_rec(f, id, &v, 4); }
+static void pdb_u64(FILE *f, u32 id, u64 v) { pdb_rec(f, id, &v, 8); }
+static void pdb_str(FILE *f, u32 id, const char *s) { pdb_rec(f, id, s, strlen(s) + 1); }
+
+static int write_pdb(const char *path, const char *dir, const char *pkgname, const char *title, u64 size, int second) {
+    FILE *f = fopen(path, "wb"); if (!f) return 0;
+    u32 ver = 0; fwrite(&ver, 4, 1, f);
+    pdb_u32(f, 0x64, 0); pdb_u32(f, 0x65, 0); pdb_u8(f, 0x66, 0); pdb_u32(f, 0x6B, 3);
+    pdb_u32(f, 0x68, 0); pdb_u32(f, 0x6C, 0); pdb_u8(f, 0xDA, 1); pdb_u8(f, 0xCD, 1);
+    pdb_u64(f, 0xD0, size); pdb_u64(f, 0xCE, size);
+    char t[512]; snprintf(t, sizeof(t), "\xE2\x98\x85 Install \"%s\"", title);
+    pdb_str(f, 0x69, t);
+    pdb_str(f, 0xCB, pkgname);
+    char icon[300]; snprintf(icon, sizeof(icon), "%s/ICON_FILE", dir);
+    if (second) pdb_str(f, 0x00, icon);
+    pdb_str(f, 0x6A, icon);
+    pdb_u32(f, 0xF0, 5); pdb_u8(f, 0xF1, 1); pdb_u8(f, 0xF2, 0); pdb_u32(f, 0xF4, 0x1962);
+    pdb_u8(f, 0xDA, 1); pdb_u8(f, 0xCD, 0); pdb_u8(f, 0xEC, 1); pdb_u8(f, 0xFC, 0);
+    int ok = !ferror(f); fclose(f); return ok;
+}
+
+static int copy_file(const char *src, const char *dst) {
+    FILE *a = fopen(src, "rb"); if (!a) return 0;
+    FILE *b = fopen(dst, "wb"); if (!b) { fclose(a); return 0; }
+    char buf[16384]; size_t n; int ok = 1;
+    while ((n = fread(buf, 1, sizeof(buf), a)) > 0) if (fwrite(buf, 1, n, b) != n) { ok = 0; break; }
+    fclose(a); fclose(b); return ok;
+}
+
+static int queue_install(void) {
+    struct stat st; if (stat(dl_final, &st) != 0) return 0;
+    mkdir("/dev_hdd0/vsh", 0777); mkdir(INSTALL_DIR, 0777);
+    char dir[256]; u32 id = 80000000;
+    for (;; id++) { snprintf(dir, sizeof(dir), INSTALL_DIR "/%u", id); if (stat(dir, &st) != 0) break; }
+    if (mkdir(dir, 0777) != 0) return 0;
+    char p[512];
+    snprintf(p, sizeof(p), "%s/ICON_FILE", dir);
+    if (!dl_icon[0] || !copy_file(dl_icon, p)) copy_file(APPDIR "ICON0.PNG", p);
+    snprintf(p, sizeof(p), "%s/d0.pdb", dir); int ok = write_pdb(p, dir, dl_name, dl_title, (u64)st.st_size, 0);
+    snprintf(p, sizeof(p), "%s/d1.pdb", dir); ok = ok && write_pdb(p, dir, dl_name, dl_title, (u64)st.st_size, 1);
+    snprintf(p, sizeof(p), "%s/f0.pdb", dir); FILE *f = fopen(p, "wb"); if (f) fclose(f); else ok = 0;
+    snprintf(p, sizeof(p), "%s/%s", dir, dl_name);
+    if (ok && rename(dl_final, p) == 0) return 1;
+    /* undo: leave the pkg in /dev_hdd0/packages */
+    const char *names[] = { "ICON_FILE", "d0.pdb", "d1.pdb", "f0.pdb" };
+    for (int i = 0; i < 4; i++) { snprintf(p, sizeof(p), "%s/%s", dir, names[i]); unlink(p); }
+    rmdir(dir);
+    return 0;
+}
+
 static void dl_poll(void) {
     static double last_now; static u32 last_frame;
     if (dl_active && frame_no - last_frame >= 60) {
@@ -524,6 +582,7 @@ static void dl_poll(void) {
     }
     if (!dl_active && dl_state) {
         if (dl_state == 2) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_FAIL); show_toast(t); }
+        else if (dl_state == 1) show_toast(queue_install() ? S_QUEUED : S_INSTFAIL);
         else show_toast(dl_state == 1 ? S_DONE : dl_state == 3 ? S_CANCELED : S_SPACE);
         dl_state = 0; last_now = 0;
     }
@@ -561,7 +620,7 @@ static void activate(Node *n) {
         if (depth + 1 >= MAX_DEPTH) return;
         Level *L = &stack[depth + 1];
         if (load_level(L, n->tfile, n->tview)) {
-            cur_title = n->title;
+            cur_title = n->title; cur_icon = n->icon;
             if (L->n == 1 && !L->items[0].folder) { do_action(&L->items[0]); free_level(L); return; }
             L->title = strdup(n->title); L->pic = n->pic ? strdup(n->pic) : (stack[depth].pic ? strdup(stack[depth].pic) : NULL);
             depth++;
@@ -570,7 +629,7 @@ static void activate(Node *n) {
         }
         return;
     }
-    cur_title = NULL;
+    cur_title = NULL; cur_icon = n->icon;
     do_action(n);
 }
 

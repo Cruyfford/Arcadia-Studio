@@ -19,3 +19,5 @@
 #define S_CANCELED "ﻞﻳﺰﻨﺘﻟﺍ ﺀﺎﻐﻟﺇ ﻢﺗ"
 #define S_CANCEL "ﺀﺎﻐﻟﺇ O"
 #define S_SPACE "ﺔﻴﻓﺎﻛ ﺔﺣﺎﺴﻣ ﺪﺟﻮﺗ ﻻ"
+#define S_QUEUED "ﺎﻴﺋﺎﻘﻠﺗ ﺖﻴﺒﺜﺘﻟﺍ ﺃﺪﺒﻴﺳﻭ ﻖﻴﺒﻄﺘﻟﺍ ﻦﻣ ﺝﺮﺧﺍ ،ﻞﻳﺰﻨﺘﻟﺍ ﻞﻤﺘﻛﺍ"
+#define S_INSTFAIL "Install Package Files ﻦﻣ ﻪﺘﺒﺛ ،ﺖﻴﺒﺜﺘﻟﺍ ﺰﻴﻬﺠﺗ ﺭﺬﻌﺗ ﻦﻜﻟ ﻞﻳﺰﻨﺘﻟﺍ ﻞﻤﺘﻛﺍ"
