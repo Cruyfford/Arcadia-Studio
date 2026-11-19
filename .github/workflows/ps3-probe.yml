@@ -9,11 +9,10 @@ jobs:
         run: |
           docker run --rm hldtux/ps3dev:latest bash -lc '
             cd $PS3DEV
-            echo "=== tiny3d.h"; grep -E "^(int|void|u32|float|void \*|u8|s32|unsigned|typedef|#define TINY3D|extern)" portlibs/ppu/include/tiny3d.h | head -150
-            echo "=== pngdec.h"; cat ppu/include/pngdec/pngdec.h | head -80
-            echo "=== ppu_rules"; cat ppu_rules
-            echo "=== portlibs libs"; ls portlibs/ppu/lib
-            echo "=== io/pad.h"; grep -n "BTN_\|ioPad" ppu/include/io/pad.h | head -60
-            echo "=== sysutil"; grep -n "SYSUTIL_EXIT\|sysUtilRegisterCallback\|sysUtilCheckCallback" -r ppu/include/sysutil/*.h | head
-            find / -path /proc -prune -o -name "*.c" -path "*tiny3d*" -print 2>/dev/null | head -20
+            echo "=== enums"; sed -n "/typedef enum/,/}/p" portlibs/ppu/include/tiny3d.h | grep -v "^\s*//" | head -150
+            grep -n "TEXTURE_\|#define" portlibs/ppu/include/tiny3d.h | head -40
+            echo "=== pngdec tail"; sed -n 80,400p ppu/include/pngdec/pngdec.h | grep -n "pngData\|pngLoad\|bmp_out\|pitch\|width\|height" | head -30
+            echo "=== sysmodule"; grep -n "PNGDEC\|FREETYPE\|NET\b\|SYSUTIL_ID_PNG" ppu/include/sysmodule/sysmodule.h | head
+            echo "=== net"; grep -n "netInitialize\|netDeinitialize" -r ppu/include/net/*.h | head
+            echo "=== ft"; ls portlibs/ppu/include | head -60; ls portlibs/ppu/include/freetype2 2>/dev/null | head
           '
