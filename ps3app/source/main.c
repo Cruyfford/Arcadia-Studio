@@ -28,6 +28,7 @@
 #include FT_FREETYPE_H
 
 #include "ui_strings.h"
+#include "pkginst.h"
 
 SYS_PROCESS_PARAM(1001, 0x100000);
 
@@ -387,7 +388,7 @@ static void free_level(Level *L) {
 
 /* ------------------------------------------------------------------ webMAN */
 static char toast[300]; static int toast_frames;
-static void show_toast(const char *s) { snprintf(toast, sizeof(toast), "%s", s); toast_frames = 60 * 5; }
+static void show_toast(const char *s) { snprintf(toast, sizeof(toast), "%s", s); toast_frames = 60 * 8; }
 
 /* the request runs on its own thread so the UI never freezes */
 static volatile int wm_busy, wm_result;      /* result: 0 none, 1 ok, 2 fail */
@@ -437,7 +438,7 @@ static void webman_poll(void) {
 
 /* ------------------------------------------------------------------ built-in downloader (no webMAN needed) */
 #define PKG_DIR "/dev_hdd0/packages"
-static volatile int dl_active, dl_cancel, dl_state;   /* state: 0 none, 1 done, 2 fail, 3 canceled */
+static volatile int dl_active, dl_cancel, dl_state, dl_phase;   /* phase 0 download, 1 install */   /* state: 0 none, 1 done, 2 fail, 3 canceled */
 static volatile double dl_now, dl_total, dl_speed;
 static char dl_err[160]; static char dl_icon[512];
 static char dl_url[2048], dl_name[256], dl_title[256], dl_final[512], dl_part[512];
@@ -475,7 +476,17 @@ static void dl_entry(void *arg) {
         long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
         curl_easy_cleanup(c);
         fclose(f); f = NULL;
-        if (r == CURLE_OK && code < 400) { unlink(dl_final); state = rename(dl_part, dl_final) == 0 ? 1 : 2; }
+        if (r == CURLE_OK && code < 400) {
+            unlink(dl_final);
+            if (rename(dl_part, dl_final) != 0) state = 2;
+            else {
+                /* install right here, inside the app */
+                dl_phase = 1; dl_now = 0; dl_total = 0;
+                char dest[512];
+                if (pkg_install(dl_final, "/dev_hdd0", dest, sizeof(dest), dl_err, sizeof(dl_err), &dl_now, &dl_total)) { unlink(dl_final); state = 1; }
+                else state = 5;
+            }
+        }
         else {
             state = dl_cancel ? 3 : (r == CURLE_WRITE_ERROR ? 4 : 2);
             if (r != CURLE_OK) snprintf(dl_err, sizeof(dl_err), "curl %d: %s", (int)r, curl_easy_strerror(r));
@@ -514,64 +525,8 @@ static void start_download(const char *url, const char *title) {
     mkdir(PKG_DIR, 0777);
     snprintf(dl_final, sizeof(dl_final), PKG_DIR "/%s", dl_name);
     snprintf(dl_part, sizeof(dl_part), PKG_DIR "/%s.part", dl_name);
-    dl_now = dl_total = dl_speed = 0; dl_cancel = 0; dl_state = 0; dl_active = 1;
+    dl_now = dl_total = dl_speed = 0; dl_cancel = 0; dl_state = 0; dl_phase = 0; dl_active = 1;
     if (sysThreadCreate(&dl_thread, dl_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) { dl_active = 0; show_toast(S_FAIL); }
-}
-
-/* queue the downloaded pkg for the XMB installer: /dev_hdd0/vsh/game_pkg/<id>/ with d0/d1/f0.pdb + ICON_FILE
-   (Project Database records, see psdevwiki "Project_Database_(PDB)"; PS3 is big endian so values are written as-is) */
-#define INSTALL_DIR "/dev_hdd0/vsh/game_pkg"
-
-static void pdb_rec(FILE *f, u32 id, const void *data, u32 len) { fwrite(&id, 4, 1, f); fwrite(&len, 4, 1, f); fwrite(&len, 4, 1, f); fwrite(data, len, 1, f); }
-static void pdb_u8(FILE *f, u32 id, u8 v) { pdb_rec(f, id, &v, 1); }
-static void pdb_u32(FILE *f, u32 id, u32 v) { pdb_rec(f, id, &v, 4); }
-static void pdb_u64(FILE *f, u32 id, u64 v) { pdb_rec(f, id, &v, 8); }
-static void pdb_str(FILE *f, u32 id, const char *s) { pdb_rec(f, id, s, strlen(s) + 1); }
-
-static int write_pdb(const char *path, const char *dir, const char *pkgname, const char *title, u64 size, int second) {
-    FILE *f = fopen(path, "wb"); if (!f) return 0;
-    u32 ver = 0; fwrite(&ver, 4, 1, f);
-    pdb_u32(f, 0x64, 0); pdb_u32(f, 0x65, 0); pdb_u8(f, 0x66, 0); pdb_u32(f, 0x6B, 3);
-    pdb_u32(f, 0x68, 0); pdb_u32(f, 0x6C, 0); pdb_u8(f, 0xDA, 1); pdb_u8(f, 0xCD, 1);
-    pdb_u64(f, 0xD0, size); pdb_u64(f, 0xCE, size);
-    char t[512]; snprintf(t, sizeof(t), "\xE2\x98\x85 Install \"%s\"", title);
-    pdb_str(f, 0x69, t);
-    pdb_str(f, 0xCB, pkgname);
-    char icon[300]; snprintf(icon, sizeof(icon), "%s/ICON_FILE", dir);
-    if (second) pdb_str(f, 0x00, icon);
-    pdb_str(f, 0x6A, icon);
-    pdb_u32(f, 0xF0, 5); pdb_u8(f, 0xF1, 1); pdb_u8(f, 0xF2, 0); pdb_u32(f, 0xF4, 0x1962);
-    pdb_u8(f, 0xDA, 1); pdb_u8(f, 0xCD, 0); pdb_u8(f, 0xEC, 1); pdb_u8(f, 0xFC, 0);
-    int ok = !ferror(f); fclose(f); return ok;
-}
-
-static int copy_file(const char *src, const char *dst) {
-    FILE *a = fopen(src, "rb"); if (!a) return 0;
-    FILE *b = fopen(dst, "wb"); if (!b) { fclose(a); return 0; }
-    char buf[16384]; size_t n; int ok = 1;
-    while ((n = fread(buf, 1, sizeof(buf), a)) > 0) if (fwrite(buf, 1, n, b) != n) { ok = 0; break; }
-    fclose(a); fclose(b); return ok;
-}
-
-static int queue_install(void) {
-    struct stat st; if (stat(dl_final, &st) != 0) return 0;
-    mkdir("/dev_hdd0/vsh", 0777); mkdir(INSTALL_DIR, 0777);
-    char dir[256]; u32 id = 80000000;
-    for (;; id++) { snprintf(dir, sizeof(dir), INSTALL_DIR "/%u", id); if (stat(dir, &st) != 0) break; }
-    if (mkdir(dir, 0777) != 0) return 0;
-    char p[512];
-    snprintf(p, sizeof(p), "%s/ICON_FILE", dir);
-    if (!dl_icon[0] || !copy_file(dl_icon, p)) copy_file(APPDIR "ICON0.PNG", p);
-    snprintf(p, sizeof(p), "%s/d0.pdb", dir); int ok = write_pdb(p, dir, dl_name, dl_title, (u64)st.st_size, 0);
-    snprintf(p, sizeof(p), "%s/d1.pdb", dir); ok = ok && write_pdb(p, dir, dl_name, dl_title, (u64)st.st_size, 1);
-    snprintf(p, sizeof(p), "%s/f0.pdb", dir); FILE *f = fopen(p, "wb"); if (f) fclose(f); else ok = 0;
-    snprintf(p, sizeof(p), "%s/%s", dir, dl_name);
-    if (ok && rename(dl_final, p) == 0) return 1;
-    /* undo: leave the pkg in /dev_hdd0/packages */
-    const char *names[] = { "ICON_FILE", "d0.pdb", "d1.pdb", "f0.pdb" };
-    for (int i = 0; i < 4; i++) { snprintf(p, sizeof(p), "%s/%s", dir, names[i]); unlink(p); }
-    rmdir(dir);
-    return 0;
 }
 
 static void dl_poll(void) {
@@ -582,7 +537,8 @@ static void dl_poll(void) {
     }
     if (!dl_active && dl_state) {
         if (dl_state == 2) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_FAIL); show_toast(t); }
-        else if (dl_state == 1) show_toast(queue_install() ? S_QUEUED : S_INSTFAIL);
+        else if (dl_state == 1) show_toast(S_INSTALLED);
+        else if (dl_state == 5) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_BADPKG); show_toast(t); }
         else show_toast(dl_state == 1 ? S_DONE : dl_state == 3 ? S_CANCELED : S_SPACE);
         dl_state = 0; last_now = 0;
     }
@@ -593,7 +549,7 @@ static void draw_download(void) {
     draw_quad(0, 0, SW, SH, 0x000000A0);
     float x = 144, y = 176, w = 560, h = 160;
     draw_quad(x, y, w, h, 0x141A3CF0); draw_quad(x, y, w, 3, 0x7C3AEDFF);
-    draw_text_shadow(S_DLING, x + 24, y + 36, 16, 0xFFD166FF, 0);
+    draw_text_shadow(dl_phase ? S_INSTALLING : S_DLING, x + 24, y + 36, 16, 0xFFD166FF, 0);
     draw_text_shadow(dl_title, x + 24, y + 66, 15, 0xFFFFFFFF, w - 48);
     float pct = dl_total > 0 ? (float)(dl_now / dl_total) : 0;
     draw_quad(x + 24, y + 86, w - 48, 14, 0xFFFFFF22);
@@ -602,7 +558,7 @@ static void draw_download(void) {
     if (dl_total > 0) snprintf(t, sizeof(t), "%d%%   %.1f / %.1f MB   %.2f MB/s", (int)(pct * 100), dl_now / 1048576.0, dl_total / 1048576.0, dl_speed / 1048576.0);
     else snprintf(t, sizeof(t), "%.1f MB   %.2f MB/s", dl_now / 1048576.0, dl_speed / 1048576.0);
     draw_text(t, x + 24, y + 126, 13, 0xE6E6F0FF, 0);
-    draw_text(S_CANCEL, x + w - 24 - text_width(S_CANCEL, 13), y + 126, 13, 0xFFFFFFAA, 0);
+    if (!dl_phase) draw_text(S_CANCEL, x + w - 24 - text_width(S_CANCEL, 13), y + 126, 13, 0xFFFFFFAA, 0);
     draw_text(dl_name, x + 24, y + 148, 10, 0xFFFFFF77, w - 48);
 }
 
@@ -765,7 +721,7 @@ int main(int argc, const char *argv[]) {
         webman_poll();
         dl_poll();
         read_pad();
-        if (dl_active) { if (pressed(K_O)) dl_cancel = 1; }
+        if (dl_active) { if (pressed(K_O)) { if (dl_phase) show_toast(S_NOCANCEL); else dl_cancel = 1; } }
         else if (depth >= 0) {
             Level *L = &stack[depth];
             if (L->n) {

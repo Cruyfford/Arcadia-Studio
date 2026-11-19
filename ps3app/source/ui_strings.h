@@ -21,3 +21,7 @@
 #define S_SPACE "ﺔﻴﻓﺎﻛ ﺔﺣﺎﺴﻣ ﺪﺟﻮﺗ ﻻ"
 #define S_QUEUED "ﺎﻴﺋﺎﻘﻠﺗ ﺖﻴﺒﺜﺘﻟﺍ ﺃﺪﺒﻴﺳﻭ ﻖﻴﺒﻄﺘﻟﺍ ﻦﻣ ﺝﺮﺧﺍ ،ﻞﻳﺰﻨﺘﻟﺍ ﻞﻤﺘﻛﺍ"
 #define S_INSTFAIL "Install Package Files ﻦﻣ ﻪﺘﺒﺛ ،ﺖﻴﺒﺜﺘﻟﺍ ﺰﻴﻬﺠﺗ ﺭﺬﻌﺗ ﻦﻜﻟ ﻞﻳﺰﻨﺘﻟﺍ ﻞﻤﺘﻛﺍ"
+#define S_INSTALLING "ﺖﻴﺒﺜﺘﻟﺍ ﺭﺎﺟ"
+#define S_INSTALLED "ﺏﺎﻌﻟﻷﺍ ﺔﻤﺋﺎﻗ ﻲﻓ ﺔﺒﻌﻠﻟﺍ ﺪﺠﺘﺳ ،ﺡﺎﺠﻨﺑ ﺖﻴﺒﺜﺘﻟﺍ ﻢﺗ"
+#define S_BADPKG "packages ﺪﻠﺠﻣ ﻲﻓ ﻅﻮﻔﺤﻣ ﻒﻠﻤﻟﺍ ،ﺖﻴﺒﺜﺘﻟﺍ ﻞﺸﻓ"
+#define S_NOCANCEL "ﺖﻴﺒﺜﺘﻟﺍ ﺀﺎﻨﺛﺃ ﺀﺎﻐﻟﻹﺍ ﻦﻜﻤﻳ ﻻ"
