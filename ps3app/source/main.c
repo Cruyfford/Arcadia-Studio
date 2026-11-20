@@ -1825,6 +1825,8 @@ static int player_open(const char *path) {
     pl.tex_ok = pt[0].mem && pt[1].mem && pt_w >= pl.w && pt_h >= pl.h;
     if (!pl.tex_ok) { snprintf(tr_err, sizeof(tr_err), "no texture memory"); player_close(); return 0; }
 #ifndef HOST_PREVIEW
+    static int dec_loaded;
+    if (!dec_loaded) { sysModuleLoad(SYSMODULE_VDEC); sysModuleLoad(SYSMODULE_VDEC_H264); audioInit(); dec_loaded = 1; }
     vdecType t = { VDEC_CODEC_TYPE_H264, 42 };
     vdecAttr at; memset(&at, 0, sizeof(at));
     if (vdecQueryAttr(&t, &at) != 0) { snprintf(tr_err, sizeof(tr_err), "vdecQueryAttr"); player_close(); return 0; }
@@ -2309,20 +2311,32 @@ static void enter_single_root(void) {
     stack[0] = tmp; stack[0].pic = pic;
 }
 
+/* start-up progress: 10 small squares, no font needed, so a hang shows where it stopped */
+static void boot_step(int k) {
+    tiny3d_Clear(0xFF05060F, TINY3D_CLEAR_ALL);
+    tiny3d_AlphaTest(1, 0x01, TINY3D_ALPHA_FUNC_GEQUAL);
+    tiny3d_Project2D();
+    for (int i = 0; i < 10; i++) draw_quad(SW / 2 - 125 + i * 25, SH / 2 - 6, 18, 12, i < k ? 0x7C5CFFFF : 0xFFFFFF22);
+    tiny3d_Flip();
+}
+
 int main(int argc, const char *argv[]) {
     tiny3d_Init(1024 * 1024);
+    boot_step(1);
     ioPadInit(7);
     sysModuleLoad(SYSMODULE_PNGDEC);
     sysModuleLoad(SYSMODULE_JPGDEC);
-#ifndef HOST_PREVIEW
-    sysModuleLoad(SYSMODULE_VDEC); sysModuleLoad(SYSMODULE_VDEC_H264); audioInit();
-#endif
+    boot_step(2);
     netInitialize();
     curl_global_init(CURL_GLOBAL_ALL);
     sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, sys_cb, NULL);
+    boot_step(3);
 
-    tex_size = 56 * 1024 * 1024;
-    tex_pool = tiny3d_AllocTexture(tex_size); tex_used = 0;
+    tex_size = 48 * 1024 * 1024;
+    tex_pool = tiny3d_AllocTexture(tex_size);
+    if (!tex_pool) { tex_size = 40 * 1024 * 1024; tex_pool = tiny3d_AllocTexture(tex_size); }
+    tex_used = 0;
+    boot_step(4);
     tex_make(&atlas, ATLAS, ATLAS_H);
     if (atlas.mem) memset(atlas.mem, 0, ATLAS * ATLAS_H * 4);
     tex_make(&t_circle, 64, 64); gen_circle(&t_circle, 0);
@@ -2330,15 +2344,21 @@ int main(int argc, const char *argv[]) {
     for (int i = 0; i < ICON_SLOTS; i++) tex_make(&icons[i].t, 320, 176);
     for (int i = 0; i < BG_SLOTS; i++) tex_make(&bgs[i].t, 960, 540);
 
+    boot_step(5);
     font_ok = !FT_Init_FreeType(&ft) && !FT_New_Face(ft, APPDIR "USRDIR/font.ttf", 0, &face) && !FT_Set_Pixel_Sizes(face, 0, GLYPH_PX) && atlas.mem;
+    boot_step(6);
     if (font_ok) preload_glyphs();
+    boot_step(7);
 
     jobs_load();
+    boot_step(8);
     video_init();
+    boot_step(9);
 #ifndef HOST_PREVIEW
     worker_running = 1;
     if (sysThreadCreate(&worker_thread, worker_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) worker_running = 0;
 #endif
+    boot_step(10);
     if (load_level(&stack[0], ROOT_XML, ROOT_VIEW)) { depth = 0; stack[0].pic = strdup(STORE "PIC1.PNG"); enter_single_root(); }
     else free_level(&stack[0]);
 
