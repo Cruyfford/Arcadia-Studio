@@ -110,7 +110,7 @@ class Rawg:
         res = self._get('games', search=name, page_size=5, search_precise='true').get('results') or []
         want = re.sub(r'[^a-z0-9]', '', name.lower())
         res.sort(key=lambda g: 0 if re.sub(r'[^a-z0-9]', '', (g.get('name') or '').lower()) == want else 1)
-        for g in res[:3]:
+        for g in res[:1]:        # one movies call per game keeps us far below the free monthly quota
             movies = self._get('games/%d/movies' % g['id']).get('results') or []
             for m in movies:
                 d = m.get('data') or {}

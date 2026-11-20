@@ -1289,8 +1289,9 @@ static void vf_entry(void *arg) {
         char key[48], name[200], url[700], part[300], dest[300];
         snprintf(key, sizeof(key), "%s", vf_key); snprintf(name, sizeof(name), "%s", vf_name);
         int ok = 0;
-        if (vid_base[0]) {           /* 1) a real video uploaded with Arcadia Studio */
-            snprintf(url, sizeof(url), "%s%s.avp", vid_base, key);
+        {                            /* 1) a real video: the store's own host, else the shared GitHub releases */
+            if (vid_base[0]) snprintf(url, sizeof(url), "%s%s.avp", vid_base, key);
+            else snprintf(url, sizeof(url), "https://github.com/Cruyfford/Arcadia-Studio/releases/download/vid%u/%s.avp", crc32_str(key) % 8, key);
             vid_path(key, dest, sizeof(dest)); snprintf(part, sizeof(part), "%s.part", dest);
             mkdir(APPDIR "USRDIR", 0777); mkdir(VID_DIR, 0777);
             if (http_get(url, part, NULL)) {
@@ -1364,7 +1365,7 @@ static Tex *video_for(Node *n, const char *search) {
         if (strcmp(waiting, key)) { snprintf(waiting, sizeof(waiting), "%s", key); vid_wait = 0; }
         vid_wait++;
         if (file_exists(p)) { if (!vf_busy || strcmp(vf_key, key)) vid_load(key); }
-        else if (vid_wait > 20 && (vid_base[0] || rawg_key[0]) && vf_running && !vf_busy && !vf_is_missing(key) && !shots_count(key)) {
+        else if (vid_wait > 20 && vf_running && !vf_busy && !vf_is_missing(key) && !shots_count(key)) {
             snprintf(vf_key, sizeof(vf_key), "%s", key); snprintf(vf_name, sizeof(vf_name), "%s", search ? search : ""); vf_busy = 1;
         }
         if (strcmp(key, vid_key)) return NULL;
