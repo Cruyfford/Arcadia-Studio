@@ -7,9 +7,9 @@ include $(PSL1GHT)/ppu_rules
 
 TARGET    := ARCADIA
 BUILD     := build
-SOURCES   := source
+SOURCES   := source source/faad
 DATA      := data
-INCLUDES  := include
+INCLUDES  := include source/faad
 
 TITLE     := ARCADIA App
 APPID     := ARCD00001
@@ -17,14 +17,14 @@ CONTENTID := UP0001-$(APPID)_00-0000000000000000
 ICON0     := $(CURDIR)/ICON0.PNG
 PKGFILES  := $(CURDIR)/pkgfiles
 
-CFLAGS    = -O2 -Wall -mcpu=cell $(MACHDEP) $(INCLUDE)
+CFLAGS    = -O2 -Wall -mcpu=cell $(MACHDEP) $(INCLUDE) -DPACKAGE_VERSION=\"2.11.2\" -DHAVE_MEMCPY -DSTDC_HEADERS -DHAVE_STRING_H -DHAVE_STDINT_H -DHAVE_INTTYPES_H
 ifneq ($(strip $(RAWG_KEY)),)
 CFLAGS   += -DRAWG_KEY=\"$(RAWG_KEY)\"
 endif
 CXXFLAGS  = $(CFLAGS)
 LDFLAGS   = $(MACHDEP) -Wl,-Map,$(notdir $@).map
 
-LIBS      := -ltiny3d -lfreetype -lpng -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lpngdec -ljpgdec -lsysmodule -lgcm_sys -lrsx -lsysutil -lio -lnet -lrt -llv2 -lm
+LIBS      := -ltiny3d -lfreetype -lpng -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lpngdec -ljpgdec -lvdec -laudio -lsysmodule -lgcm_sys -lrsx -lsysutil -lio -lnet -lrt -llv2 -lm
 LIBDIRS   := $(PORTLIBS)
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))

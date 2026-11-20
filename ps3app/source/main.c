@@ -30,6 +30,14 @@
 
 #include "ui_strings.h"
 #include "pkginst.h"
+#include "mp4demux.h"
+#include "faad/neaacdec.h"
+#ifndef HOST_PREVIEW
+#include <codec/vdec.h>
+#include <audio/audio.h>
+#include <sys/event_queue.h>
+#include <ppu-asm.h>
+#endif
 
 SYS_PROCESS_PARAM(1001, 0x100000);
 
@@ -1397,6 +1405,543 @@ static void video_init(void) {
 #endif
 }
 
+/* ------------------------------------------------------------------ trailer player: MP4 (H.264 via the PS3 hardware decoder, AAC via faad2) */
+#define TR_DIR APPDIR "USRDIR/trailers"
+enum { TR_IDLE, TR_SEARCH, TR_DOWNLOAD, TR_READY, TR_NONE, TR_FAIL };
+static volatile int tr_state, tr_cancel;
+static volatile double tr_now, tr_total;
+static char tr_key[48], tr_name[200], tr_title[256], tr_path[300], tr_err[160];
+static sys_ppu_thread_t tr_thread;
+
+static int tr_progress(void *u, curl_off_t total, curl_off_t now, curl_off_t ut, curl_off_t un) {
+    tr_total = (double)total; tr_now = (double)now; return tr_cancel ? 1 : 0;
+}
+static int http_get_progress(const char *url, const char *path) {
+    FILE *f = fopen(path, "wb"); if (!f) return 0;
+    CURL *c = curl_easy_init(); if (!c) { fclose(f); return 0; }
+    static char fbuf[1 << 20]; setvbuf(f, fbuf, _IOFBF, sizeof(fbuf));
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (PLAYSTATION 3; 4.92)");
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
+    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, tr_progress);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 40L);
+    curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
+    curl_easy_setopt(c, CURLOPT_BUFFERSIZE, 512L * 1024);
+    CURLcode r = curl_easy_perform(c);
+    struct curl_slist *resolve = NULL;
+    for (int tries = 0; r == CURLE_COULDNT_RESOLVE_HOST && tries < 4 && !tr_cancel; tries++) {
+        char *eff = NULL, host[256], ip[32], entry[320];
+        curl_easy_getinfo(c, CURLINFO_EFFECTIVE_URL, &eff);
+        url_host(eff ? eff : url, host, sizeof(host));
+        if (!host[0] || !dns_fallback(host, ip, sizeof(ip))) break;
+        snprintf(entry, sizeof(entry), "%s:80:%s", host, ip); resolve = curl_slist_append(resolve, entry);
+        snprintf(entry, sizeof(entry), "%s:443:%s", host, ip); resolve = curl_slist_append(resolve, entry);
+        curl_easy_setopt(c, CURLOPT_RESOLVE, resolve);
+        r = curl_easy_perform(c);
+    }
+    if (r != CURLE_OK) snprintf(tr_err, sizeof(tr_err), "curl %d: %s", (int)r, curl_easy_strerror(r));
+    curl_easy_cleanup(c);
+    if (resolve) curl_slist_free_all(resolve);
+    fclose(f);
+    return r == CURLE_OK;
+}
+
+/* "key":"value" after p (handles \/), returns pointer after the value or NULL */
+static const char *json_str(const char *p, const char *key, char *out, int n) {
+    char pat[64]; snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+    const char *q = strstr(p, pat); if (!q) return NULL;
+    q += strlen(pat); int j = 0;
+    while (*q && *q != '"' && j < n - 1) {
+        if (*q == '\\' && q[1]) { q++; if (*q == 'u' && q[1] && q[2] && q[3] && q[4]) { q += 5; out[j++] = '?'; continue; } }
+        out[j++] = *q++;
+    }
+    out[j] = 0; return q;
+}
+static void norm_name(const char *s, char *o, int n) {
+    int j = 0;
+    for (; *s && j < n - 4; s++) {
+        unsigned char ch = *s;
+        if (ch == '&') { o[j++] = 'a'; o[j++] = 'n'; o[j++] = 'd'; continue; }
+        if (ch >= 'A' && ch <= 'Z') ch += 32;
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) o[j++] = ch;
+    }
+    o[j] = 0;
+}
+
+static int steam_trailer(const char *name, char *url, int n) {
+    static char json[256 * 1024];
+    char q[400], u[600], want[200];
+    norm_name(name, want, sizeof(want));
+    if (strlen(want) < 3) return 0;
+    url_encode(name, q, sizeof(q));
+    snprintf(u, sizeof(u), "https://store.steampowered.com/api/storesearch/?term=%s&l=english&cc=US", q);
+    MemBuf m = { json, 0, sizeof(json) }; json[0] = 0;
+    if (!http_get(u, NULL, &m)) return 0;
+    const char *p = json; long best = 0;
+    char nm[300], nn[300];
+    while ((p = json_str(p, "name", nm, sizeof(nm)))) {
+        const char *idp = strstr(p, "\"id\":"); if (!idp) break;
+        long id = atol(idp + 5);
+        norm_name(nm, nn, sizeof(nn));
+        int ln = strlen(nn), lw = strlen(want);
+        if (!strcmp(nn, want)) { best = id; break; }
+        if (!best && lw >= 6 && (!strncmp(nn, want, lw) || !strncmp(want, nn, ln)) && abs(ln - lw) <= 12) best = id;
+    }
+    if (!best) return 0;
+    snprintf(u, sizeof(u), "https://store.steampowered.com/api/appdetails?filters=movies&appids=%ld", best);
+    m.len = 0; json[0] = 0;
+    if (!http_get(u, NULL, &m)) return 0;
+    const char *mp = strstr(json, "\"mp4\":{"); if (!mp) return 0;
+    return json_str(mp, "480", url, n) || json_str(mp, "max", url, n);
+}
+
+static int rawg_trailer(const char *name, char *url, int n) {
+    if (!rawg_key[0]) return 0;
+    static char json[256 * 1024];
+    char q[400], u[700];
+    url_encode(name, q, sizeof(q));
+    snprintf(u, sizeof(u), "https://api.rawg.io/api/games?key=%s&search=%s&page_size=1&search_precise=true", rawg_key, q);
+    MemBuf m = { json, 0, sizeof(json) }; json[0] = 0;
+    if (!http_get(u, NULL, &m)) return 0;
+    const char *r = strstr(json, "\"results\":["); if (!r) return 0;
+    const char *idp = strstr(r, "\"id\":"); if (!idp) return 0;
+    long id = atol(idp + 5); if (!id) return 0;
+    snprintf(u, sizeof(u), "https://api.rawg.io/api/games/%ld/movies?key=%s", id, rawg_key);
+    m.len = 0; json[0] = 0;
+    if (!http_get(u, NULL, &m)) return 0;
+    const char *d = strstr(json, "\"data\":{"); if (!d) return 0;
+    return json_str(d, "480", url, n) || json_str(d, "max", url, n);
+}
+
+/* keep the 6 most recent trailers on disk */
+static void tr_cache_add(const char *key) {
+    char idx[300]; snprintf(idx, sizeof(idx), TR_DIR "/index.txt");
+    char *old = read_file(idx, NULL);
+    char keys[16][48]; int n = 0;
+    if (old) { char *s = old, *t; while ((t = strtok(s, "\r\n")) && n < 16) { s = NULL; if (strcmp(t, key)) snprintf(keys[n++], 48, "%s", t); } free(old); }
+    while (n >= 6) { char p[300]; snprintf(p, sizeof(p), TR_DIR "/%s.mp4", keys[0]); unlink(p); memmove(keys[0], keys[1], sizeof(keys[0]) * (n - 1)); n--; }
+    snprintf(keys[n++], 48, "%s", key);
+    FILE *f = fopen(idx, "w"); if (!f) return;
+    for (int i = 0; i < n; i++) fprintf(f, "%s\n", keys[i]);
+    fclose(f);
+}
+
+static void tr_entry(void *arg) {
+    char url[1024] = "";
+    mkdir(APPDIR "USRDIR", 0777); mkdir(TR_DIR, 0777);
+    snprintf(tr_path, sizeof(tr_path), TR_DIR "/%s.mp4", tr_key);
+    if (!file_exists(tr_path)) {
+        tr_state = TR_SEARCH;
+        if (!steam_trailer(tr_name, url, sizeof(url)) && !tr_cancel) rawg_trailer(tr_name, url, sizeof(url));
+        if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
+        if (!url[0]) { tr_state = TR_NONE; sysThreadExit(0); }
+        tr_state = TR_DOWNLOAD; tr_now = tr_total = 0;
+        char part[320]; snprintf(part, sizeof(part), "%s.part", tr_path);
+        if (!http_get_progress(url, part)) { unlink(part); tr_state = tr_cancel ? TR_IDLE : TR_FAIL; sysThreadExit(0); }
+        unlink(tr_path); rename(part, tr_path);
+    }
+    tr_cache_add(tr_key);
+    tr_state = TR_READY;
+    sysThreadExit(0);
+}
+
+/* ---------------- playback */
+#define PL_FRAMES 6
+#define PCM_RING (48000 * 3)          /* stereo frames */
+typedef struct { u8 *px; int64_t pts90; volatile int full; } PlFrame;
+static struct {
+    int active, paused, failed;
+    Mp4 mp4;
+    int w, h, pitch;
+    PlFrame fr[PL_FRAMES]; volatile int fr_w, fr_r;
+    Tex tex[2]; int tex_cur, tex_ok;
+    volatile int stop, vdone, adone;
+    int64_t start90;                  /* media time of the first frame shown after a seek */
+    /* audio */
+    float *pcm; volatile u32 pcm_w, pcm_r;   /* frames, monotonic */
+    volatile u64 audio_frames_played;
+    u64 base_frames;                         /* audio frames already played before the current segment */
+    u32 port; int port_open;
+    sys_ppu_thread_t tv, ta, to;
+    u32 vh; volatile int au_pending, pic_ready; int vdec_open;
+    u8 *vmem;
+    double dur;
+    u32 show_osd;
+    u32 clock_frames;                        /* fallback clock when there is no audio */
+    int64_t last_pts90, frame90; int shown_any;
+} pl;
+
+static int64_t to90(const Mp4Track *t, int64_t v) { return v * 90000 / (t->timescale ? t->timescale : 90000); }
+
+#ifndef HOST_PREVIEW
+static u32 vdec_cb(u32 handle, u32 msgtype, u32 msgdata, u32 arg) {
+    if (msgtype == VDEC_CALLBACK_AUDONE) { if (pl.au_pending > 0) pl.au_pending--; }
+    else if (msgtype == VDEC_CALLBACK_PICOUT) pl.pic_ready++;
+    return 0;
+}
+#endif
+
+/* pull every finished picture into the frame queue */
+static void pl_collect(void) {
+#ifndef HOST_PREVIEW
+    while (pl.pic_ready > 0 && !pl.stop) {
+        PlFrame *f = &pl.fr[pl.fr_w % PL_FRAMES];
+        while (f->full && !pl.stop) usleep(2000);
+        if (pl.stop) return;
+        u32 item = 0; int64_t pts = 0;
+        if (vdecGetPicItem(pl.vh, &item) == 0 && item) {
+            vdecPicture *pi = (vdecPicture *)(u64)item;
+            pts = ((int64_t)pi->pts[0].hi << 32) | pi->pts[0].low;
+        }
+        vdecPictureFormat fmt = { VDEC_PICFMT_ARGB32, VDEC_COLOR_MATRIX_BT709, 0xFF };
+        if (vdecGetPicture(pl.vh, &fmt, f->px) != 0) { pl.pic_ready = 0; return; }
+        pl.pic_ready--;
+        if (pts <= pl.last_pts90 || (u32)pts == 0xFFFFFFFF) pts = pl.last_pts90 + pl.frame90;   /* missing/odd timestamps */
+        pl.last_pts90 = pts;
+        f->pts90 = pts; f->full = 1; pl.fr_w++;
+    }
+#endif
+}
+
+/* video decode thread: AVCC samples -> Annex-B access units -> hardware decoder */
+static void pl_video(void *arg) {
+    Mp4Track *v = &pl.mp4.video;
+    u32 maxs = 0; for (u32 i = 0; i < v->count; i++) if (v->s[i].size > maxs) maxs = v->s[i].size;
+    const int SLOTS = 8;
+    u32 slot_sz = maxs + v->sps_pps_len + 64 * 4 + 64;
+    u8 *ring = memalign(128, (size_t)slot_sz * SLOTS), *tmp = malloc(maxs + 16);
+    FILE *vf = fopen(tr_path, "rb");
+    u32 start = (u32)(u64)arg, k = 0;
+    for (u32 i = start; i < v->count && !pl.stop && ring && tmp; i++, k++) {
+        Mp4Sample *s = &v->s[i];
+        u8 *au = ring + (size_t)(k % SLOTS) * slot_sz; u32 al = 0;
+        if (!mp4_read_fp(vf, s, tmp)) break;
+        if (s->key) { memcpy(au, v->sps_pps, v->sps_pps_len); al = v->sps_pps_len; }
+        u32 p = 0;
+        while (p + v->nal_len <= s->size) {
+            u32 l = 0; for (int b = 0; b < v->nal_len; b++) l = (l << 8) | tmp[p + b];
+            p += v->nal_len;
+            if (p + l > s->size || al + 4 + l > slot_sz) break;
+            au[al] = 0; au[al + 1] = 0; au[al + 2] = 0; au[al + 3] = 1; memcpy(au + al + 4, tmp + p, l); al += 4 + l; p += l;
+        }
+#ifndef HOST_PREVIEW
+        while (pl.au_pending >= SLOTS - 1 && !pl.stop) { pl_collect(); usleep(1000); }
+        int64_t pts = to90(v, s->dts + s->cts), dts = to90(v, s->dts);
+        vdecAU a; memset(&a, 0, sizeof(a));
+        a.packet_addr = (u32)(u64)au; a.packet_size = al;
+        a.pts.low = (u32)pts; a.pts.hi = (u32)(pts >> 32); a.dts.low = (u32)dts; a.dts.hi = (u32)(dts >> 32);
+        pl.au_pending++;
+        int r, tries = 0;
+        while ((r = vdecDecodeAu(pl.vh, VDEC_DECODER_MODE_NORMAL, &a)) == (int)VDEC_ERROR_BUSY && !pl.stop && tries++ < 2000) { pl_collect(); usleep(1000); }
+        if (r) { pl.au_pending--; }
+        pl_collect();
+#else
+        /* host preview only: frames come from ffmpeg instead of the PS3 decoder */
+        (void)al;
+        static FILE *ff; static u32 ff_start = 0xFFFFFFFF;
+        if (ff_start != start) {
+            if (ff) pclose(ff);
+            char cmd[600]; snprintf(cmd, sizeof(cmd), "ffmpeg -v error -ss %.3f -i '%s' -an -f rawvideo -pix_fmt bgra -", (double)to90(v, v->s[start].dts) / 90000.0, tr_path);
+            ff = popen(cmd, "r"); ff_start = start;
+        }
+        PlFrame *f = &pl.fr[pl.fr_w % PL_FRAMES];
+        while (f->full && !pl.stop) usleep(2000);
+        if (pl.stop) break;
+        if (!ff || fread(f->px, 1, (size_t)pl.pitch * pl.h, ff) != (size_t)pl.pitch * pl.h) break;
+        f->pts90 = pl.last_pts90 + pl.frame90; pl.last_pts90 = f->pts90; f->full = 1; pl.fr_w++;
+#endif
+    }
+#ifndef HOST_PREVIEW
+    for (int t = 0; t < 400 && !pl.stop && (pl.au_pending > 0 || pl.pic_ready > 0); t++) { pl_collect(); usleep(5000); }
+#endif
+    free(ring); free(tmp); if (vf) fclose(vf);
+    pl.vdone = 1;
+    sysThreadExit(0);
+}
+
+/* audio decode thread: AAC -> 48 kHz stereo float ring */
+static void pl_audio(void *arg) {
+    Mp4Track *a = &pl.mp4.audio;
+    NeAACDecHandle h = NeAACDecOpen();
+    NeAACDecConfigurationPtr cfg = NeAACDecGetCurrentConfiguration(h);
+    cfg->outputFormat = FAAD_FMT_FLOAT; cfg->downMatrix = 1; NeAACDecSetConfiguration(h, cfg);
+    unsigned long rate = 0; unsigned char ch = 0;
+    if (NeAACDecInit2(h, a->asc, a->asc_len, &rate, &ch) < 0 || !rate) { NeAACDecClose(h); pl.adone = 1; sysThreadExit(0); }
+    u32 maxs = 0; for (u32 i = 0; i < a->count; i++) if (a->s[i].size > maxs) maxs = a->s[i].size;
+    u8 *buf = malloc(maxs + 16);
+    FILE *af = fopen(tr_path, "rb");
+    double step = (double)rate / 48000.0, pos = 0;     /* linear resampler */
+    float last[2] = { 0, 0 };
+    for (u32 i = (u32)(u64)arg; i < a->count && !pl.stop && buf; i++) {
+        if (!mp4_read_fp(af, &a->s[i], buf)) break;
+        NeAACDecFrameInfo fi;
+        float *pcm = (float *)NeAACDecDecode(h, &fi, buf, a->s[i].size);
+        if (fi.error || !pcm || !fi.samples) continue;
+        int chn = fi.channels ? fi.channels : 1, nfr = fi.samples / chn;
+        /* resample this block */
+        while (!pl.stop) {
+            double ip = pos; int i0 = (int)ip; if (i0 >= nfr) { pos -= nfr; break; }
+            float fr = (float)(ip - i0);
+            float l0 = i0 == 0 ? last[0] : pcm[(i0 - 1) * chn], r0 = i0 == 0 ? last[1] : pcm[(i0 - 1) * chn + (chn > 1)];
+            float l1 = pcm[i0 * chn], r1 = pcm[i0 * chn + (chn > 1)];
+            (void)l0; (void)r0;
+            while (pl.pcm_w - pl.pcm_r >= PCM_RING - 1 && !pl.stop) usleep(4000);
+            u32 w = pl.pcm_w % PCM_RING;
+            pl.pcm[w * 2] = l0 + (l1 - l0) * fr; pl.pcm[w * 2 + 1] = r0 + (r1 - r0) * fr;
+            pl.pcm_w++;
+            pos += step;
+        }
+        last[0] = pcm[(nfr - 1) * chn]; last[1] = pcm[(nfr - 1) * chn + (chn > 1)];
+    }
+    free(buf); NeAACDecClose(h); if (af) fclose(af);
+    pl.adone = 1;
+    sysThreadExit(0);
+}
+
+#ifndef HOST_PREVIEW
+static sys_event_queue_t snd_queue; static u64 snd_key;
+/* audio output thread: feeds the hardware port block by block */
+static void pl_out(void *arg) {
+    audioPortConfig cfg; audioGetPortConfig(pl.port, &cfg);
+    f32 *data = (f32 *)(u64)cfg.audioDataStart;
+    while (!pl.stop) {
+        sys_event_t ev;
+        if (sysEventQueueReceive(snd_queue, &ev, 20 * 1000) != 0) continue;
+        u64 cur = *(u64 *)(u64)cfg.readIndex;
+        f32 *b = data + cfg.channelCount * AUDIO_BLOCK_SAMPLES * ((cur + 2) % cfg.numBlocks);
+        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+            if (!pl.paused && pl.pcm_r < pl.pcm_w) {
+                u32 r = pl.pcm_r % PCM_RING; b[i * 2] = pl.pcm[r * 2]; b[i * 2 + 1] = pl.pcm[r * 2 + 1]; pl.pcm_r++;
+                pl.audio_frames_played++;
+            } else { b[i * 2] = 0; b[i * 2 + 1] = 0; }
+        }
+    }
+    sysThreadExit(0);
+}
+#endif
+
+static int64_t pl_clock90(void) {
+    if (pl.mp4.audio.present && pl.port_open) return pl.start90 + (int64_t)((pl.audio_frames_played) * 90000 / 48000);
+    return pl.start90 + (int64_t)pl.clock_frames * 1500;      /* 60 fps display */
+}
+
+static void pl_stop_threads(void) {
+    pl.stop = 1;
+    for (int i = 0; i < 200 && !(pl.vdone && (pl.adone || !pl.mp4.audio.present)); i++) usleep(10000);
+#ifndef HOST_PREVIEW
+    if (pl.vdec_open) { vdecEndSequence(pl.vh); usleep(20000); }
+#endif
+}
+
+/* start (or restart after a seek) decoding from video sample `vi` */
+static void pl_start_at(u32 vi) {
+    Mp4Track *v = &pl.mp4.video, *a = &pl.mp4.audio;
+    while (vi > 0 && !v->s[vi].key) vi--;
+    pl.stop = 0; pl.vdone = 0; pl.adone = !a->present;
+    for (int i = 0; i < PL_FRAMES; i++) pl.fr[i].full = 0;
+    pl.fr_w = pl.fr_r = 0; pl.au_pending = 0; pl.pic_ready = 0;
+    pl.pcm_w = pl.pcm_r = 0; pl.audio_frames_played = 0; pl.clock_frames = 0;
+    pl.start90 = to90(v, v->s[vi].dts + v->s[vi].cts);
+    pl.last_pts90 = pl.start90 - pl.frame90; pl.shown_any = 0;
+    u32 ai = 0;
+    if (a->present) {
+        int64_t want = (int64_t)pl.start90 * a->timescale / 90000;
+        while (ai + 1 < a->count && a->s[ai + 1].dts <= want) ai++;
+    }
+#ifndef HOST_PREVIEW
+    if (pl.vdec_open) vdecStartSequence(pl.vh);
+#endif
+    sysThreadCreate(&pl.tv, pl_video, (void *)(u64)vi, 1000, 0x10000, 0, "pl_video");
+    if (a->present) sysThreadCreate(&pl.ta, pl_audio, (void *)(u64)ai, 1000, 0x20000, 0, "pl_audio");
+}
+
+static void player_close(void);
+static int player_open(const char *path) {
+    memset(&pl, 0, sizeof(pl));
+    char err[100];
+    if (!mp4_open(&pl.mp4, path, err, sizeof(err))) { snprintf(tr_err, sizeof(tr_err), "mp4: %s", err); return 0; }
+    Mp4Track *v = &pl.mp4.video;
+    pl.w = v->width; pl.h = v->height;
+    if (pl.w < 16 || pl.h < 16 || pl.w > 1920 || pl.h > 1088) { snprintf(tr_err, sizeof(tr_err), "size %dx%d", pl.w, pl.h); mp4_close(&pl.mp4); return 0; }
+    pl.pitch = pl.w * 4;
+    pl.frame90 = v->count > 1 ? to90(v, v->s[1].dts - v->s[0].dts) : 3000; if (pl.frame90 <= 0) pl.frame90 = 3000;
+    pl.dur = v->count ? (double)(v->s[v->count - 1].dts) / v->timescale : 0;
+    for (int i = 0; i < PL_FRAMES; i++) pl.fr[i].px = memalign(128, (size_t)pl.pitch * pl.h);
+    /* two textures sized for the video (taken once from the pool) */
+    static Tex pt[2]; static int pt_w, pt_h;
+    if (pt_w < pl.w || pt_h < pl.h) {
+        int tw = pl.w > 864 ? 1280 : 864, th = pl.h > 480 ? 720 : 480;
+        if (pt_w < tw || pt_h < th) { tex_make(&pt[0], tw, th); tex_make(&pt[1], tw, th); pt_w = tw; pt_h = th; }
+    }
+    pl.tex[0] = pt[0]; pl.tex[1] = pt[1];
+    pl.tex_ok = pt[0].mem && pt[1].mem && pt_w >= pl.w && pt_h >= pl.h;
+    if (!pl.tex_ok) { snprintf(tr_err, sizeof(tr_err), "no texture memory"); player_close(); return 0; }
+#ifndef HOST_PREVIEW
+    vdecType t = { VDEC_CODEC_TYPE_H264, 42 };
+    vdecAttr at; memset(&at, 0, sizeof(at));
+    if (vdecQueryAttr(&t, &at) != 0) { snprintf(tr_err, sizeof(tr_err), "vdecQueryAttr"); player_close(); return 0; }
+    pl.vmem = memalign(1024, at.mem_size);
+    vdecConfig c; memset(&c, 0, sizeof(c));
+    c.mem_addr = (u32)(u64)pl.vmem; c.mem_size = at.mem_size; c.ppu_thread_prio = 400; c.ppu_thread_stack_size = 0x4000;
+    c.spu_thread_prio = 200; c.num_spus = 1;
+    vdecClosure cl = { (u32)__get_opd32(vdec_cb), 0 };
+    int r = vdecOpen(&t, &c, &cl, &pl.vh);
+    if (r) { snprintf(tr_err, sizeof(tr_err), "vdecOpen %08x", r); player_close(); return 0; }
+    pl.vdec_open = 1;
+    if (pl.mp4.audio.present) {
+        pl.pcm = malloc(sizeof(float) * 2 * PCM_RING);
+        audioPortParam pp = { AUDIO_PORT_2CH, AUDIO_BLOCK_8, AUDIO_PORT_INITLEVEL, 1.0f };
+        if (pl.pcm && audioPortOpen(&pp, &pl.port) == 0) {
+            audioCreateNotifyEventQueue(&snd_queue, &snd_key);
+            audioSetNotifyEventQueue(snd_key);
+            sysEventQueueDrain(snd_queue);
+            audioPortStart(pl.port);
+            pl.port_open = 1;
+            sysThreadCreate(&pl.to, pl_out, NULL, 900, 0x4000, 0, "pl_out");
+        } else pl.mp4.audio.present = 0;
+    }
+#else
+    pl.mp4.audio.present = 0;
+#endif
+    pl.active = 1; pl.show_osd = frame_no + 240;
+    pl_start_at(0);
+    return 1;
+}
+
+static void player_close(void) {
+    pl_stop_threads();
+#ifndef HOST_PREVIEW
+    if (pl.port_open) {
+        usleep(30000);
+        audioPortStop(pl.port); audioRemoveNotifyEventQueue(snd_key); audioPortClose(pl.port); sysEventQueueDestroy(snd_queue, 0);
+        pl.port_open = 0;
+    }
+    if (pl.vdec_open) { vdecClose(pl.vh); pl.vdec_open = 0; }
+#endif
+    for (int i = 0; i < PL_FRAMES; i++) free(pl.fr[i].px);
+    free(pl.vmem); free(pl.pcm);
+    mp4_close(&pl.mp4);
+    pl.active = 0;
+}
+
+static void player_seek(double secs) {
+    Mp4Track *v = &pl.mp4.video;
+    int64_t target = (int64_t)((pl_clock90() / 90000.0 + secs) * v->timescale);
+    if (target < 0) target = 0;
+    pl_stop_threads();
+    u32 vi = 0; while (vi + 1 < v->count && v->s[vi + 1].dts <= target) vi++;
+    pl_start_at(vi);
+    pl.show_osd = frame_no + 180;
+}
+
+static void fmt_time(double s, char *o, int n) { int t = (int)s; snprintf(o, n, "%d:%02d", t / 60, t % 60); }
+
+static void player_frame(void) {
+    if (!pl.paused) pl.clock_frames++;
+    int64_t now = pl_clock90();
+    /* newest frame that is due */
+    PlFrame *show = NULL;
+    while (pl.fr_r < pl.fr_w) {
+        PlFrame *f = &pl.fr[pl.fr_r % PL_FRAMES];
+        if (!f->full) break;
+        PlFrame *nx = pl.fr_r + 1 < pl.fr_w ? &pl.fr[(pl.fr_r + 1) % PL_FRAMES] : NULL;
+        if (f->pts90 > now && (show || pl.shown_any)) break;
+        if (show) show->full = 0;
+        show = f; pl.fr_r++;
+        if (!nx || !nx->full || nx->pts90 > now) break;
+    }
+    if (show) {
+        Tex *t = &pl.tex[pl.tex_cur ^ 1];
+        for (int y = 0; y < pl.h; y++) memcpy(t->mem + (size_t)y * t->w * 4, show->px + (size_t)y * pl.pitch, pl.pitch);
+        t->used_w = pl.w; t->used_h = pl.h; pl.tex_cur ^= 1;
+        show->full = 0; pl.shown_any = 1;
+    }
+    draw_quad(0, 0, SW, SH, 0x000000FF);
+    Tex *t = &pl.tex[pl.tex_cur];
+    if (t->used_w) {
+        float ar = (float)pl.w / pl.h, w = SW, h = SW / ar;
+        if (h > SH) { h = SH; w = SH * ar; }
+        draw_tex_uv(t, (SW - w) / 2, (SH - h) / 2, w, h, 0, 0, (float)t->used_w / t->w, (float)t->used_h / t->h, 0xFFFFFFFF);
+    } else text_c(S_TR_PREP, SW / 2, SH / 2, 13, C_SOFT, 0);
+    /* on-screen controls */
+    int done = pl.vdone && pl.fr_r >= pl.fr_w;
+    if (pl.paused || frame_no < pl.show_osd || done) {
+        draw_grad(0, SH - 96, SW, 96, 0x00000000, 0x000000E0);
+        double cur = now / 90000.0; if (cur > pl.dur) cur = pl.dur;
+        float bx = LX, bw = SW - 2 * LX, by = SH - 58;
+        draw_rrect(bx, by, bw, 6, 3, 0xFFFFFF33);
+        if (pl.dur > 0) draw_rrect(bx, by, bw * (float)(cur / pl.dur), 6, 3, C_ACCENT);
+        char a[16], b[16], tt[40]; fmt_time(cur, a, sizeof(a)); fmt_time(pl.dur, b, sizeof(b)); snprintf(tt, sizeof(tt), "%s / %s", a, b);
+        draw_text(tt, LX, by - 10, 10, C_TEXT, 0);
+        text_rb(tr_title, RX, by - 10, 12, C_TEXT, 500);
+        float x = RX, cy = SH - 28;
+        glyph_x(x - 8.5f, cy, 8.5f, 0); x -= 22; text_r(pl.paused ? S_PLAY : S_PAUSE, x, cy + 3.6f, 10, C_SOFT, 0); x -= text_width(pl.paused ? S_PLAY : S_PAUSE, 10) + 22;
+        glyph_o(x - 8.5f, cy, 8.5f); x -= 22; text_r(S_CLOSE, x, cy + 3.6f, 10, C_SOFT, 0); x -= text_width(S_CLOSE, 10) + 22;
+        draw_text("\xE2\x86\x90 \xE2\x86\x92", x - 30, cy + 3.6f, 10, C_TEXT, 0); x -= 38; text_r(S_SEEK, x, cy + 3.6f, 10, C_SOFT, 0);
+    }
+}
+
+static void trailer_open(Node *n, const char *search) {
+    if (tr_state == TR_SEARCH || tr_state == TR_DOWNLOAD) return;
+    key_of(n->title, n->info, tr_key, sizeof(tr_key));
+    snprintf(tr_name, sizeof(tr_name), "%s", search ? search : n->title);
+    snprintf(tr_title, sizeof(tr_title), "%s", has_arabic(n->title) && search ? search : n->title);
+    tr_cancel = 0; tr_err[0] = 0; tr_state = TR_SEARCH;
+    if (sysThreadCreate(&tr_thread, tr_entry, NULL, 1100, 0x10000, 0, "trailer") != 0) tr_state = TR_FAIL;
+}
+
+/* loading screen while the trailer is searched / downloaded; returns 1 while it covers the screen */
+static int trailer_draw(void) {
+    if (pl.active) { player_frame(); return 1; }
+    if (tr_state == TR_READY) {
+        tr_state = TR_IDLE;
+        if (!player_open(tr_path)) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", tr_err, S_TR_FAIL); show_toast(t); unlink(tr_path); }
+        return pl.active;
+    }
+    if (tr_state == TR_NONE) { tr_state = TR_IDLE; show_toast(S_TR_NONE); return 0; }
+    if (tr_state == TR_FAIL) { tr_state = TR_IDLE; char t[300]; snprintf(t, sizeof(t), "(%s)  %s", tr_err, S_TR_FAIL); show_toast(t); return 0; }
+    if (tr_state != TR_SEARCH && tr_state != TR_DOWNLOAD) return 0;
+    draw_quad(0, 0, SW, SH, 0x04050CE6);
+    float w = 420, h = 120, x = (SW - w) / 2, y = (SH - h) / 2;
+    draw_rrect(x, y, w, h, 16, 0x12152EFF);
+    text_rb(tr_title, x + w - 24, y + 36, 15, C_TEXT, w - 48);
+    if (tr_state == TR_SEARCH) text_r(S_TR_SEARCH, x + w - 24, y + 64, 10.5f, C_GOLD, 0);
+    else {
+        float p = tr_total > 0 ? (float)(tr_now / tr_total) : 0;
+        char t[80]; snprintf(t, sizeof(t), "%d%%   %.1f / %.1f MB", (int)(p * 100), tr_now / 1048576.0, tr_total / 1048576.0);
+        text_r(S_TR_DL, x + w - 24, y + 64, 10.5f, C_GOLD, 0);
+        draw_rrect(x + 24, y + 76, w - 48, 8, 4, 0xFFFFFF1A);
+        if (p > 0.01f) draw_rrect(x + 24 + (w - 48) * (1 - p), y + 76, (w - 48) * p, 8, 4, C_ACCENT);
+        draw_text(t, x + 24, y + 104, 9.5f, 0xCFCBE6FF, 0);
+    }
+    glyph_o(x + 32, y + 30, 8); draw_text(S_CANCEL3, x + 46, y + 34, 9.5f, C_SOFT, 0);
+    return 1;
+}
+
+/* input while the trailer covers the screen; returns 1 when it consumed the input */
+static int trailer_input(void) {
+    if (pl.active) {
+        if (pressed(K_O)) { player_close(); return 1; }
+        if (pressed(K_X)) {
+            if (pl.vdone && pl.fr_r >= pl.fr_w) player_seek(-1e9);      /* ended: play again */
+            else pl.paused = !pl.paused;
+            pl.show_osd = frame_no + 180;
+        }
+        if (pressed(K_RIGHT)) player_seek(10);
+        if (pressed(K_LEFT)) player_seek(-10);
+        return 1;
+    }
+    if (tr_state == TR_SEARCH || tr_state == TR_DOWNLOAD) { if (pressed(K_O)) tr_cancel = 1; return 1; }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ game page */
 static int gp_open;
 static void draw_game(Level *L) {
@@ -1471,6 +2016,10 @@ static void draw_game(Level *L) {
     glyph_o(x2 - 22, y + 20, 8);
     draw_text(S_BACK, x2 - 36 - text_width(S_BACK, 11.5f), y + 24.5f, 11.5f, C_TEXT, 0);
 
+    float w3 = text_width(S_TRAILER, 11.5f) + 52, x3 = x2 - w2 - 10;
+    draw_rrect(x3 - w3, y, w3, 40, 11, 0xFFFFFF14);
+    glyph_sq(x3 - 22, y + 20, 8);
+    draw_text(S_TRAILER, x3 - 36 - text_width(S_TRAILER, 11.5f), y + 24.5f, 11.5f, C_TEXT, 0);
     glyph_check(r - 7, 281, 12, C_MINT);
     text_r(S_INAPP, r - 20, 285, 10, 0xCFCBE6FF, mw - 20);
 
@@ -1487,7 +2036,7 @@ static void draw_game(Level *L) {
         if (mt) draw_image_fit(mt, nx - s + 2, 344, s - 4, s - 4, i == L->sel ? 0xFFFFFFFF : 0xFFFFFFBB);
         nx -= s + 10;
     }
-    Hint h[] = { {0, S_DLINST}, {1, S_BACK}, {3, S_DOWNLOADS}, {2, S_PREVNEXT} };
+    Hint h[] = { {0, S_DLINST}, {4, S_TRAILER}, {1, S_BACK}, {3, S_DOWNLOADS} };
     char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", L->sel + 1, L->n);
     draw_footer(h, 4, pos);
 }
@@ -1601,6 +2150,7 @@ static void downloads_input(void) {
 }
 
 static void draw_screen(void) {
+    if (trailer_draw()) { draw_toast(); return; }
     if (depth < 0) {
         draw_backdrop(NULL, 1);
         text_c(S_NOSTORE, SW / 2, SH / 2, 14, C_TEXT, SW - 80);
@@ -1628,6 +2178,7 @@ static void open_item(Level *L) {
 
 static void handle_input(void) {
     if (exit_warn) exit_warn--;
+    if (trailer_input()) return;
     if (depth < 0) { if (pressed(K_O) || pressed(K_X)) running = 0; return; }
     if (dl_view) { downloads_input(); return; }
     if (pressed(K_TRI)) { dl_view = 1; dl_sel = 0; dl_top = 0; return; }
@@ -1635,6 +2186,11 @@ static void handle_input(void) {
     int n = L->n;
     if (gp_open) {
         if (pressed(K_O)) { gp_open = 0; return; }
+        if (pressed(K_SQ) && n) {
+            Node *g = &L->items[L->sel];
+            trailer_open(g, has_arabic(g->title) && L->title ? L->title : g->title);
+            return;
+        }
         if (pressed(K_X)) { open_item(L); return; }
         int step = 0;
         if (pressed(K_LEFT) || pressed(K_R1)) step = 1;
@@ -1700,11 +2256,14 @@ int main(int argc, const char *argv[]) {
     ioPadInit(7);
     sysModuleLoad(SYSMODULE_PNGDEC);
     sysModuleLoad(SYSMODULE_JPGDEC);
+#ifndef HOST_PREVIEW
+    sysModuleLoad(SYSMODULE_VDEC); sysModuleLoad(SYSMODULE_VDEC_H264); audioInit();
+#endif
     netInitialize();
     curl_global_init(CURL_GLOBAL_ALL);
     sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, sys_cb, NULL);
 
-    tex_size = 40 * 1024 * 1024;
+    tex_size = 56 * 1024 * 1024;
     tex_pool = tiny3d_AllocTexture(tex_size); tex_used = 0;
     tex_make(&atlas, ATLAS, ATLAS_H);
     if (atlas.mem) memset(atlas.mem, 0, ATLAS * ATLAS_H * 4);
@@ -1754,6 +2313,8 @@ int main(int argc, const char *argv[]) {
         tiny3d_Flip();
     }
 
+    if (pl.active) player_close();
+    tr_cancel = 1;
     worker_quit = 1; vf_quit = 1;
     for (int i = 0; (wm_busy || worker_running || vf_running) && i < 300; i++) usleep(20000);
     jobs_save();
