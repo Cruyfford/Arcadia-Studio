@@ -34,6 +34,7 @@ jobs:
           cd /tmp/psl1ght && make install-ctrl && make && make install
       - name: tiny3d
         run: |
+          mkdir -p $PS3DEV/portlibs/ppu/include $PS3DEV/portlibs/ppu/lib
           git clone --depth 1 https://github.com/wargio/tiny3d /tmp/tiny3d
           cd /tmp/tiny3d/lib && make && make install || (cd /tmp/tiny3d && make -C lib install)
           ls $PS3DEV/portlibs/ppu/lib | grep -i tiny3d
