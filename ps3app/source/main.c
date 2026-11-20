@@ -1205,6 +1205,7 @@ static size_t mem_write(void *p, size_t sz, size_t n, void *u) {
     if (m->len + add + 1 > m->cap) return 0;
     memcpy(m->buf + m->len, p, add); m->len += add; m->buf[m->len] = 0; return add;
 }
+static char http_err[160]; static volatile int http_fails;
 static int http_get(const char *url, const char *path, MemBuf *mem) {
     FILE *f = NULL;
     if (!mem) { f = fopen(path, "wb"); if (!f) return 0; }
@@ -1232,6 +1233,13 @@ static int http_get(const char *url, const char *path, MemBuf *mem) {
         curl_easy_setopt(c, CURLOPT_RESOLVE, resolve);
         if (mem) mem->len = 0;
         r = curl_easy_perform(c);
+    }
+    if (r != CURLE_OK) {
+        long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        char host[128]; url_host(url, host, sizeof(host));
+        if (r == CURLE_HTTP_RETURNED_ERROR) snprintf(http_err, sizeof(http_err), "%s HTTP %ld", host, code);
+        else snprintf(http_err, sizeof(http_err), "%s curl %d: %s", host, (int)r, curl_easy_strerror(r));
+        http_fails++;
     }
     curl_easy_cleanup(c);
     if (resolve) curl_slist_free_all(resolve);
@@ -1484,22 +1492,33 @@ static int steam_trailer(const char *name, char *url, int n) {
     snprintf(u, sizeof(u), "https://store.steampowered.com/api/storesearch/?term=%s&l=english&cc=US", q);
     MemBuf m = { json, 0, sizeof(json) }; json[0] = 0;
     if (!http_get(u, NULL, &m)) return 0;
-    const char *p = json; long best = 0;
+    const char *p = json;
+    long ids[3]; int nid = 0, exact = -1; size_t bestlen[3];
     char nm[300], nn[300];
     while ((p = json_str(p, "name", nm, sizeof(nm)))) {
         const char *idp = strstr(p, "\"id\":"); if (!idp) break;
         long id = atol(idp + 5);
         norm_name(nm, nn, sizeof(nn));
-        int ln = strlen(nn), lw = strlen(want);
-        if (!strcmp(nn, want)) { best = id; break; }
-        if (!best && lw >= 6 && (!strncmp(nn, want, lw) || !strncmp(want, nn, ln)) && abs(ln - lw) <= 12) best = id;
+        size_t ln = strlen(nn), lw = strlen(want);
+        int ok = !strcmp(nn, want) || (lw >= 5 && (!strncmp(nn, want, lw) || (ln >= 5 && !strncmp(want, nn, ln))));
+        if (!ok) continue;
+        if (!strcmp(nn, want) && exact < 0) { exact = nid; }
+        if (nid < 3) { ids[nid] = id; bestlen[nid] = ln; nid++; }
     }
-    if (!best) return 0;
-    snprintf(u, sizeof(u), "https://store.steampowered.com/api/appdetails?filters=movies&appids=%ld", best);
-    m.len = 0; json[0] = 0;
-    if (!http_get(u, NULL, &m)) return 0;
-    const char *mp = strstr(json, "\"mp4\":{"); if (!mp) return 0;
-    return json_str(mp, "480", url, n) || json_str(mp, "max", url, n);
+    if (!nid) return 0;
+    /* exact name first, then shorter names (the base game rather than editions/DLC) */
+    for (int a = 0; a < nid; a++) for (int b = a + 1; b < nid; b++) {
+        int sw = (b == exact) || (a != exact && bestlen[b] < bestlen[a]);
+        if (sw) { long t = ids[a]; ids[a] = ids[b]; ids[b] = t; size_t tl = bestlen[a]; bestlen[a] = bestlen[b]; bestlen[b] = tl; if (exact == b) exact = a; else if (exact == a) exact = b; }
+    }
+    for (int c = 0; c < nid; c++) {
+        snprintf(u, sizeof(u), "https://store.steampowered.com/api/appdetails?filters=movies&appids=%ld", ids[c]);
+        m.len = 0; json[0] = 0;
+        if (!http_get(u, NULL, &m)) continue;
+        const char *mp = strstr(json, "\"mp4\":{"); if (!mp) continue;
+        if (json_str(mp, "480", url, n) || json_str(mp, "max", url, n)) return 1;
+    }
+    return 0;
 }
 
 static int rawg_trailer(const char *name, char *url, int n) {
@@ -1539,9 +1558,14 @@ static void tr_entry(void *arg) {
     snprintf(tr_path, sizeof(tr_path), TR_DIR "/%s.mp4", tr_key);
     if (!file_exists(tr_path)) {
         tr_state = TR_SEARCH;
+        int fails0 = http_fails;
         if (!steam_trailer(tr_name, url, sizeof(url)) && !tr_cancel) rawg_trailer(tr_name, url, sizeof(url));
         if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
-        if (!url[0]) { tr_state = TR_NONE; sysThreadExit(0); }
+        if (!url[0]) {
+            if (http_fails != fails0) { snprintf(tr_err, sizeof(tr_err), "%s", http_err); tr_state = TR_FAIL; }
+            else tr_state = TR_NONE;
+            sysThreadExit(0);
+        }
         tr_state = TR_DOWNLOAD; tr_now = tr_total = 0;
         char part[320]; snprintf(part, sizeof(part), "%s.part", tr_path);
         if (!http_get_progress(url, part)) { unlink(part); tr_state = tr_cancel ? TR_IDLE : TR_FAIL; sysThreadExit(0); }
