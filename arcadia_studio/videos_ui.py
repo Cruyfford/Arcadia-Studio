@@ -3,36 +3,43 @@ Everything happens from the right-click menu, like the rest of the studio."""
 import json
 import os
 import subprocess
+import time
 import sys
 import threading
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QUrl
+from PySide6.QtGui import QPixmap, QIcon, QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit, QGroupBox, QFormLayout,
                                QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFileDialog, QInputDialog,
                                QMessageBox, QDialog)
 
 from .ui_common import context_menu, add, header, shortcut
 from .core import previews as pv
+from .core.youtube_videos import YouTube
 from .core.publish import upload_archive, public_url
 
-ST_OK, ST_MISS, ST_NONE, ST_ERR, ST_WORK = '✅ موجود', '— لا يوجد', '✖ لم يُعثر عليه', '⚠️ خطأ', '⏳ جاري...'
+ST_OK, ST_MISS, ST_NONE, ST_ERR, ST_WORK, ST_YT = '✅ موجود', '— لا يوجد', '✖ لم يُعثر عليه', '⚠️ خطأ', '⏳ جاري...', '▶ YouTube (رابط)'
 SYSTEMS = ['تلقائي من اسم القسم', 'PS3', 'PS2', 'PS1', 'PSP']
 LINK_FILE = 'USRDIR/PREVIEWS.txt'
 
 
 class FetchThread(QThread):
     row = Signal(str, str, str)        # key, status, note
+    youtube_found = Signal(str, str, str, str)  # game key, video id, title, channel
     finished_all = Signal(int, int)
 
-    def __init__(self, games, folder, creds, system, names, rawg_key=''):
+    def __init__(self, games, folder, creds, system, names, rawg_key='', youtube_key=''):
         super().__init__(); self.games, self.folder, self.creds, self.system, self.names = games, folder, creds, system, names
         self.rawg_key = rawg_key
+        self.youtube_key = youtube_key
         self.cancel = threading.Event()
 
     def run(self):
         sources = []
-        # Platform-specific ScreenScraper first; RAWG only after exact name verification.
+        youtube = YouTube(self.youtube_key) if self.youtube_key else None
+        youtube_requests = 0
+        # 1) YouTube official title search (watch link only).
+        # 2) ScreenScraper and 3) RAWG supply permitted MP4s for the PS3 player.
         if self.creds[0] and self.creds[1]: sources.append(pv.ScreenScraper(*self.creds))
         if self.rawg_key: sources.append(pv.Rawg(self.rawg_key))
         cache = {}          # search name -> mp4 path (several regions share one clip)
@@ -43,13 +50,23 @@ class FetchThread(QThread):
             key = g['key']
             dest = os.path.join(self.folder, key + '.avp')
             trailer = os.path.join(self.folder, 'trailers', key + '.mp4')
-            if os.path.exists(dest) and os.path.exists(trailer):
-                ok += 1
-                self.row.emit(key, ST_OK, 'صوت + فيديو')
-                continue
             name = self.names.get(key) or g['search']
             system = self.system or pv.guess_system(g['path'])
             self.row.emit(key, ST_WORK, name)
+            yt_match = None
+            if youtube and youtube_requests < 50 and not self.cancel.is_set():
+                youtube_requests += 1
+                try:
+                    yt_match = youtube.find_video(name, system)
+                    if yt_match:
+                        self.youtube_found.emit(key, yt_match['id'], yt_match['title'], yt_match['channel'])
+                except Exception:
+                    # API quotas / network errors must not prevent ScreenScraper and RAWG.
+                    youtube = None
+            if os.path.exists(dest) and os.path.exists(trailer):
+                ok += 1
+                self.row.emit(key, ST_OK, 'صوت + فيديو' + (' — رابط YouTube' if yt_match else ''))
+                continue
             try:
                 mp4 = cache.get((name, system))
                 if not mp4:
@@ -67,8 +84,11 @@ class FetchThread(QThread):
                             break
                         url = None
                     if not url:
-                        miss += 1
-                        self.row.emit(key, ST_NONE, 'اسم اللعبة غير مطابق أو لا يوجد فيديو')
+                        if yt_match:
+                            self.row.emit(key, ST_YT, 'يوتيوب مطابق، لكن ليس رابط MP4 قابلاً للتشغيل على PS3')
+                        else:
+                            miss += 1
+                            self.row.emit(key, ST_NONE, 'اسم اللعبة غير مطابق أو لا يوجد فيديو')
                         continue
                     mp4 = os.path.join(src_dir, key + '.mp4')
                     mp4 = src.download(url, mp4)
@@ -104,9 +124,10 @@ class VideosPage(QWidget):
     def __init__(self, win):
         super().__init__(); self.win = win; st = win.settings
         self.games = []; self.status = {}; self.thread = None
+        self.youtube_links = {}
         v = QVBoxLayout(self); v.setContentsMargins(20, 16, 20, 12)
         t = QLabel('🎬 فيديوهات الألعاب'); t.setStyleSheet('font-size:22px;font-weight:bold'); v.addWidget(t)
-        sub = QLabel('فيديوهات الألعاب: مطابقة الاسم الكامل، فيديو MP4 بالصوت ومقطع معاينة AVP صامت لجهاز PS3.')
+        sub = QLabel('المصادر: YouTube أولاً للبحث وفتح الفيديو، ثم ScreenScraper وRAWG لإنشاء MP4 يعمل على PS3.')
         sub.setStyleSheet('color:#9aa6d8'); v.addWidget(sub)
 
         top = QHBoxLayout()
@@ -118,26 +139,26 @@ class VideosPage(QWidget):
         top.addWidget(QLabel('عرض:')); top.addWidget(self.filter)
         v.addLayout(top)
 
-        g = QGroupBox('مصادر الفيديو — RAWG.io (مفتاح فوري) و/أو ScreenScraper.fr'); f = QFormLayout(g); f.setLabelAlignment(Qt.AlignRight)
+        g = QGroupBox('المصادر: 1. YouTube  2. ScreenScraper  3. RAWG (بدون Steam)'); f = QFormLayout(g); f.setLabelAlignment(Qt.AlignRight)
         self.e = {}
-        for k, lab, pw in (('rawg_key', 'مفتاح RAWG (من rawg.io/apidocs)', True),('ss_devid', 'Dev ID (من منتدى ScreenScraper)', False), ('ss_devpass', 'Dev Password', True),
+        for k, lab, pw in (('youtube_api_key', 'مفتاح YouTube Data API v3', True), ('rawg_key', 'مفتاح RAWG (من rawg.io/apidocs)', True),('ss_devid', 'Dev ID (من منتدى ScreenScraper)', False), ('ss_devpass', 'Dev Password', True),
                            ('ss_user', 'اسم المستخدم', False), ('ss_pass', 'كلمة المرور', True)):
             e = QLineEdit(st.value(k, '') or ''); e.setEchoMode(QLineEdit.Password if pw else QLineEdit.Normal)
             e.editingFinished.connect(lambda k=k, e=e: self.win.settings.setValue(k, e.text().strip()))
             self.e[k] = e; f.addRow(lab, e)
         v.addWidget(g)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(['اللعبة', 'المفتاح', 'الحالة', 'القسم', 'ملاحظة', 'تريلر بالصوت'])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(['اللعبة', 'المفتاح', 'الحالة', 'القسم', 'ملاحظة', 'تريلر بالصوت', 'YouTube'])
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch); hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        for c in (1, 2, 4, 5): hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        for c in (1, 2, 4, 5, 6): hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.cellDoubleClicked.connect(lambda r, c: self.play())
         v.addWidget(self.table, 1)
         self.info = QLabel(''); self.info.setStyleSheet('color:#7f8bc0'); v.addWidget(self.info)
-        hint = QLabel('💡 كلك يمين على الجدول: جلب الفيديوهات، إضافة مقطع من ملف، تشغيل، رفع إلى archive.org، ربط المتجر — دبل كلك يشغّل الفيديو')
+        hint = QLabel('💡 YouTube: رابط مشاهدة مطابق فقط. افتحه من القائمة. لأجل تشغيل الفيديو على PS3 أضف MP4 تملك حقوق استخدامه أو استخدم المصدرين الآخرين.')
         hint.setStyleSheet('color:#7f8bc0'); hint.setWordWrap(True); v.addWidget(hint)
         context_menu(self.table, self.menu)
         shortcut(self.table, 'Delete', self.delete)
@@ -150,6 +171,45 @@ class VideosPage(QWidget):
         os.makedirs(d, exist_ok=True); return d
 
     def _names_path(self): return os.path.join(self.folder, 'names.json')
+
+    def youtube_path(self): return os.path.join(self.folder, 'youtube_matches.json')
+
+    def load_youtube(self):
+        try:
+            with open(self.youtube_path(), encoding='utf-8') as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(d, dict): return {}
+        return {key: v for key, v in d.items()
+                if isinstance(v, dict) and isinstance(v.get('id'), str)
+                and len(v['id']) == 11 and v.get('expires', 0) > time.time()}
+
+    def youtube_result(self, key, video_id, title, channel):
+        self.youtube_links[key] = {'id': video_id, 'title': title,
+                                   'channel': channel, 'expires': time.time() + 7 * 86400}
+        try:
+            with open(self.youtube_path(), 'w', encoding='utf-8') as f:
+                json.dump(self.youtube_links, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+        row = self.row_of(key)
+        if row >= 0:
+            cell = self.table.item(row, 6)
+            if cell:
+                cell.setText('▶ YouTube')
+                cell.setToolTip(title + ' — ' + channel)
+
+    def open_youtube(self):
+        items = self.selected()
+        if len(items) != 1: return
+        data = self.youtube_links.get(items[0]['key'])
+        if not data:
+            QMessageBox.information(self, 'YouTube', 'ابدأ البحث أولاً بمفتاح YouTube API.')
+            return
+        video_id = data['id']
+        if len(video_id) == 11 and all(ch.isalnum() or ch in '_-' for ch in video_id):
+            QDesktopServices.openUrl(QUrl('https://www.youtube.com/watch?v=' + video_id))
 
     @property
     def tfolder(self):
@@ -173,6 +233,7 @@ class VideosPage(QWidget):
         i = self.scope.findData(cur); self.scope.setCurrentIndex(max(i, 0)); self.scope.blockSignals(False)
 
     def reload(self):
+        self.youtube_links = self.load_youtube()
         if not self.win.store:
             self.info.setText('افتح مشروع المتجر أولاً'); return
         self.games = pv.collect_games(self.win.store, self.scope.currentData())
@@ -180,7 +241,7 @@ class VideosPage(QWidget):
         for r, g in enumerate(self.games):
             have = os.path.exists(os.path.join(self.folder, g['key'] + '.avp'))
             st = self.status.get(g['key']) or (ST_OK if have else ST_MISS)
-            for c, val in enumerate((g['title'], g['key'], st, g['path'].strip(' /'), '', '🎬 موجود' if self.has_trailer(g['key']) else '—')):
+            for c, val in enumerate((g['title'], g['key'], st, g['path'].strip(' /'), '', '🎬 موجود' if self.has_trailer(g['key']) else '—', '▶ YouTube' if g['key'] in self.youtube_links else '—')):
                 it = QTableWidgetItem(val); it.setData(Qt.UserRole, r); self.table.setItem(r, c, it)
         self.apply_filter(); self.count()
 
@@ -221,6 +282,7 @@ class VideosPage(QWidget):
             add(m, '⬇ جلب فيديوهات المحدد', lambda: self.fetch(sel), enabled=bool(sel))
             add(m, '⬇ جلب كل الناقص في القسم', lambda: self.fetch([g for g in self.games if not (os.path.exists(os.path.join(self.folder, g['key'] + '.avp')) and self.has_trailer(g['key']))]))
         m.addSeparator()
+        add(m, '▶ فتح الفيديو المطابق على YouTube', self.open_youtube, enabled=(len(sel) == 1 and sel[0]['key'] in self.youtube_links))
         add(m, '🎬 إضافة تريلر بالصوت (MP4) للعبة المحددة...', self.add_trailer, enabled=len(sel) == 1)
         add(m, '🗑 حذف التريلر', self.delete_trailer, enabled=bool(sel))
         m.addSeparator()
@@ -239,18 +301,21 @@ class VideosPage(QWidget):
     def creds(self):
         c = tuple(self.e[k].text().strip() for k in ('ss_devid', 'ss_devpass', 'ss_user', 'ss_pass'))
         self.rawg = self.e['rawg_key'].text().strip()
+        self.youtube_key = self.e['youtube_api_key'].text().strip()
         for k, e in self.e.items(): self.win.settings.setValue(k, e.text().strip())
         return c
 
     def fetch(self, games):
         if not games: return
         c = self.creds()
-        if not self.rawg and not (c[0] and c[1]):
-            QMessageBox.information(self, 'مصدر الفيديو', 'اكتب مفتاح RAWG (فوري ومجاني من rawg.io/apidocs)، '
-                                    'أو بيانات مطوّر ScreenScraper إذا وصلتك.'); return
+        if not self.youtube_key and not self.rawg and not (c[0] and c[1]):
+            QMessageBox.information(self, 'مصدر الفيديو',
+                'ضع مفتاح YouTube Data API أو RAWG أو بيانات مطور ScreenScraper. '
+                'YouTube يعرض رابط الفيديو فقط وليس ملف MP4 لتشغيله على PS3.'); return
         sysname = None if self.system.currentIndex() == 0 else self.system.currentText()
-        self.thread = FetchThread(games, self.folder, c, sysname, self.names(), self.rawg)
+        self.thread = FetchThread(games, self.folder, c, sysname, self.names(), self.rawg, self.youtube_key)
         self.thread.row.connect(self.set_row)
+        self.thread.youtube_found.connect(self.youtube_result)
         self.thread.finished_all.connect(lambda ok, miss: (self.count(), self.win.statusBar().showMessage(
             '✔ الفيديوهات: %d جاهزة، %d لم يُعثر عليها' % (ok, miss), 10000)))
         self.thread.start()
@@ -298,7 +363,7 @@ class VideosPage(QWidget):
     def rename_search(self):
         g = self.selected()[0]
         names = self.names()
-        name, ok = QInputDialog.getText(self, 'البحث باسم آخر', 'الاسم في ScreenScraper:', text=names.get(g['key'], g['search']))
+        name, ok = QInputDialog.getText(self, 'البحث باسم آخر', 'اسم البحث في YouTube وScreenScraper وRAWG:', text=names.get(g['key'], g['search']))
         if not ok or not name.strip(): return
         names[g['key']] = name.strip(); json.dump(names, open(self._names_path(), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
         self.fetch([g])
@@ -323,7 +388,7 @@ class VideosPage(QWidget):
 
     def change_folder(self):
         d = QFileDialog.getExistingDirectory(self, 'مجلد الفيديوهات', self.folder)
-        if d: self.win.settings.setValue('prev_folder', d); self.status = {}; self.reload()
+        if d: self.win.settings.setValue('prev_folder', d); self.status = {}; self.youtube_links = {}; self.reload()
 
     # ---------------- publishing
     def item_name(self):

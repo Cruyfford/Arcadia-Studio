@@ -17,6 +17,8 @@ jobs:
         run: pip install -r requirements.txt pyinstaller
       - name: Smoke test (imports)
         run: python -c "import arcadia_studio.app, arcadia_studio.converter, arcadia_studio.xmb_ui, arcadia_studio.ftp_ui, arcadia_studio.strings_ui, arcadia_studio.history_ui, arcadia_studio.core.fontmerge, arcadia_studio.core.pkginfo, arcadia_studio.core.ps2conv, arcadia_studio.core.ps1conv; print('imports ok')"
+      - name: Test YouTube title matching (offline)
+        run: python -m unittest discover -s tests -p test_youtube_videos.py -v
       - name: Build EXE
         run: >
           pyinstaller --noconfirm --onefile --windowed --name ArcadiaStudio
