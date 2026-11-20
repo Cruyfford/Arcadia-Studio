@@ -436,67 +436,29 @@ static void webman_poll(void) {
     if (wm_result) { show_toast(wm_result == 1 ? wm_ok_msg : S_NOWM); wm_result = 0; }
 }
 
-/* ------------------------------------------------------------------ built-in downloader (no webMAN needed) */
+/* ------------------------------------------------------------------ background download queue (no webMAN needed) */
 #define PKG_DIR "/dev_hdd0/packages"
-static volatile int dl_active, dl_cancel, dl_state, dl_phase;   /* phase 0 download, 1 install */   /* state: 0 none, 1 done, 2 fail, 3 canceled */
-static volatile double dl_now, dl_total, dl_speed;
-static char dl_err[160]; static char dl_icon[512];
-static char dl_url[2048], dl_name[256], dl_title[256], dl_final[512], dl_part[512];
-static sys_ppu_thread_t dl_thread;
+#define DL_LIST APPDIR "USRDIR/downloads.txt"
+enum { J_QUEUED, J_DOWNLOADING, J_INSTALLING, J_DONE, J_FAILED, J_CANCELED };
+#define MAX_JOBS 96
+typedef struct {
+    volatile int state, cancel, used;
+    volatile double now, total, speed;
+    char url[1024], title[256], info[160], icon[384], err[160];
+    char name[256], final_[512], part[512];
+    double last_now; u32 last_frame;
+    int notified;
+} Job;
+static Job jobs[MAX_JOBS];
+static volatile int worker_quit, worker_running, jobs_dirty;
+static sys_ppu_thread_t worker_thread;
+static Job *volatile current_job;
 
 static size_t dl_write(void *p, size_t sz, size_t n, void *f) { return fwrite(p, sz, n, (FILE *)f); }
-
 static int dl_progress(void *u, curl_off_t total, curl_off_t now, curl_off_t ut, curl_off_t un) {
-    dl_total = (double)total; dl_now = (double)now;
-    return dl_cancel ? 1 : 0;
-}
-
-static void dl_entry(void *arg) {
-    int state = 2;
-    FILE *f = fopen(dl_part, "wb");
-    snprintf(dl_err, sizeof(dl_err), f ? "curl init" : "open " PKG_DIR " failed");
-    CURL *c = f ? curl_easy_init() : NULL;
-    if (c) {
-        static char fbuf[1 << 20]; setvbuf(f, fbuf, _IOFBF, sizeof(fbuf));
-        curl_easy_setopt(c, CURLOPT_URL, dl_url);
-        curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
-        curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
-        curl_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (PLAYSTATION 3; 4.92)");
-        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write);
-        curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
-        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, dl_progress);
-        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
-        curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
-        curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
-        curl_easy_setopt(c, CURLOPT_BUFFERSIZE, 512L * 1024);
-        CURLcode r = curl_easy_perform(c);
-        long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-        curl_easy_cleanup(c);
-        fclose(f); f = NULL;
-        if (r == CURLE_OK && code < 400) {
-            unlink(dl_final);
-            if (rename(dl_part, dl_final) != 0) state = 2;
-            else {
-                /* install right here, inside the app */
-                dl_phase = 1; dl_now = 0; dl_total = 0;
-                char dest[512];
-                if (pkg_install(dl_final, "/dev_hdd0", dest, sizeof(dest), dl_err, sizeof(dl_err), &dl_now, &dl_total)) { unlink(dl_final); state = 1; }
-                else state = 5;
-            }
-        }
-        else {
-            state = dl_cancel ? 3 : (r == CURLE_WRITE_ERROR ? 4 : 2);
-            if (r != CURLE_OK) snprintf(dl_err, sizeof(dl_err), "curl %d: %s", (int)r, curl_easy_strerror(r));
-            else snprintf(dl_err, sizeof(dl_err), "HTTP %ld", code);
-        }
-    }
-    if (f) fclose(f);
-    if (state != 1) unlink(dl_part);
-    dl_state = state; dl_active = 0;
-    sysThreadExit(0);
+    Job *j = (Job *)u;
+    j->total = (double)total; j->now = (double)now;
+    return (j->cancel || worker_quit) ? 1 : 0;
 }
 
 static void url_filename(const char *url, char *out, int n) {
@@ -514,37 +476,149 @@ static void url_filename(const char *url, char *out, int n) {
     if (j < 4 || strcasecmp(out + strlen(out) - 4, ".pkg")) strncat(out, ".pkg", n - strlen(out) - 1);
 }
 
-static const char *cur_icon, *cur_info;
-static char dl_info[256];
-static void start_download(const char *url, const char *title) {
-    if (dl_active) return;
-    snprintf(dl_info, sizeof(dl_info), "%s", cur_info ? cur_info : "");
-    dl_icon[0] = 0; if (cur_icon) snprintf(dl_icon, sizeof(dl_icon), "%s", cur_icon);
-    snprintf(dl_url, sizeof(dl_url), "%s", url);
-    for (char *c = dl_url; *c; c++) if (*c == ' ') { memmove(c + 3, c + 1, strlen(c + 1) + 1); c[0] = '%'; c[1] = '2'; c[2] = '0'; }
-    url_filename(url, dl_name, sizeof(dl_name));
-    snprintf(dl_title, sizeof(dl_title), "%s", title ? title : dl_name);
+static void job_run(Job *jb) {
+    int state = J_FAILED;
     mkdir(PKG_DIR, 0777);
-    snprintf(dl_final, sizeof(dl_final), PKG_DIR "/%s", dl_name);
-    snprintf(dl_part, sizeof(dl_part), PKG_DIR "/%s.part", dl_name);
-    dl_now = dl_total = dl_speed = 0; dl_cancel = 0; dl_state = 0; dl_phase = 0; dl_active = 1;
-    if (sysThreadCreate(&dl_thread, dl_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) { dl_active = 0; show_toast(S_FAIL); }
+    FILE *f = fopen(jb->part, "wb");
+    snprintf(jb->err, sizeof(jb->err), f ? "curl init" : "open " PKG_DIR " failed");
+    CURL *c = f ? curl_easy_init() : NULL;
+    jb->now = jb->total = 0;
+    if (c) {
+        static char fbuf[1 << 20]; setvbuf(f, fbuf, _IOFBF, sizeof(fbuf));
+        curl_easy_setopt(c, CURLOPT_URL, jb->url);
+        curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
+        curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+        curl_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (PLAYSTATION 3; 4.92)");
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, dl_progress);
+        curl_easy_setopt(c, CURLOPT_XFERINFODATA, jb);
+        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
+        curl_easy_setopt(c, CURLOPT_BUFFERSIZE, 512L * 1024);
+        CURLcode r = curl_easy_perform(c);
+        long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+        curl_easy_cleanup(c);
+        fclose(f); f = NULL;
+        if (r == CURLE_OK && code < 400) {
+            unlink(jb->final_);
+            if (rename(jb->part, jb->final_) != 0) { snprintf(jb->err, sizeof(jb->err), "rename"); state = J_FAILED; }
+            else {
+                jb->state = J_INSTALLING; jb->now = 0; jb->total = 0;
+                char dest[512];
+                if (pkg_install(jb->final_, "/dev_hdd0", dest, sizeof(dest), jb->err, sizeof(jb->err), &jb->now, &jb->total)) { unlink(jb->final_); state = J_DONE; }
+                else state = J_FAILED;      /* the pkg stays in /dev_hdd0/packages */
+            }
+        } else if (jb->cancel) state = J_CANCELED;
+        else if (worker_quit) state = J_QUEUED;          /* app closing: resume next time */
+        else {
+            if (r == CURLE_WRITE_ERROR) snprintf(jb->err, sizeof(jb->err), "no space");
+            else if (r != CURLE_OK) snprintf(jb->err, sizeof(jb->err), "curl %d: %s", (int)r, curl_easy_strerror(r));
+            else snprintf(jb->err, sizeof(jb->err), "HTTP %ld", code);
+        }
+    }
+    if (f) fclose(f);
+    if (state != J_DONE) unlink(jb->part);
+    jb->state = state;
+    jobs_dirty = 1;
 }
 
-static int ui_done;
+static void worker_entry(void *arg) {
+    while (!worker_quit) {
+        Job *next = NULL;
+        for (int i = 0; i < MAX_JOBS; i++) if (jobs[i].used && jobs[i].state == J_QUEUED) { next = &jobs[i]; break; }
+        if (!next) { usleep(100000); continue; }
+        next->cancel = 0; next->state = J_DOWNLOADING; current_job = next;
+        job_run(next);
+        current_job = NULL;
+    }
+    worker_running = 0;
+    sysThreadExit(0);
+}
+
+/* history file: one job per line, tab separated */
+static void field(char *dst, int n, char **p) {
+    char *t = strchr(*p, '\t'); int len = t ? (int)(t - *p) : (int)strcspn(*p, "\r\n");
+    snprintf(dst, n, "%.*s", len, *p); *p += len + (t ? 1 : 0);
+}
+static void jobs_save(void) {
+    FILE *f = fopen(DL_LIST, "w"); if (!f) return;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        Job *j = &jobs[i]; if (!j->used) continue;
+        int st = (j->state == J_DOWNLOADING || j->state == J_INSTALLING) ? J_QUEUED : j->state;
+        fprintf(f, "%d\t%s\t%s\t%s\t%s\t%s\n", st, j->title, j->info, j->icon, j->url, j->err);
+    }
+    fclose(f);
+}
+static void job_paths(Job *j) {
+    url_filename(j->url, j->name, sizeof(j->name));
+    snprintf(j->final_, sizeof(j->final_), PKG_DIR "/%s", j->name);
+    snprintf(j->part, sizeof(j->part), PKG_DIR "/%s.part", j->name);
+}
+static void jobs_load(void) {
+    char *txt = read_file(DL_LIST, NULL); if (!txt) return;
+    char *p = txt; int k = 0;
+    while (*p && k < MAX_JOBS) {
+        Job *j = &jobs[k]; memset(j, 0, sizeof(*j));
+        char st[8]; field(st, sizeof(st), &p);
+        field(j->title, sizeof(j->title), &p); field(j->info, sizeof(j->info), &p); field(j->icon, sizeof(j->icon), &p);
+        field(j->url, sizeof(j->url), &p); field(j->err, sizeof(j->err), &p);
+        while (*p == '\r' || *p == '\n') p++;
+        if (!j->url[0]) continue;
+        j->state = atoi(st); j->used = 1; j->notified = 1; job_paths(j); k++;
+    }
+    free(txt);
+}
+
+static int jobs_active(void) { int n = 0; for (int i = 0; i < MAX_JOBS; i++) if (jobs[i].used && jobs[i].state <= J_INSTALLING) n++; return n; }
+
+static const char *cur_icon, *cur_info;
+static void start_download(const char *url, const char *title) {
+    char u[1024]; snprintf(u, sizeof(u), "%s", url);
+    for (char *c = u; *c && strlen(u) + 3 < sizeof(u); c++) if (*c == ' ') { memmove(c + 3, c + 1, strlen(c + 1) + 1); c[0] = '%'; c[1] = '2'; c[2] = '0'; }
+    for (int i = 0; i < MAX_JOBS; i++)
+        if (jobs[i].used && !strcmp(jobs[i].url, u) && jobs[i].state != J_FAILED && jobs[i].state != J_CANCELED) { show_toast(S_ALREADY); return; }
+    Job *j = NULL;
+    for (int i = 0; i < MAX_JOBS && !j; i++) if (jobs[i].used && !strcmp(jobs[i].url, u)) j = &jobs[i];     /* retry an old failed one */
+    for (int i = 0; i < MAX_JOBS && !j; i++) if (!jobs[i].used) j = &jobs[i];
+    if (!j) {   /* full: drop the oldest finished entry */
+        for (int i = 0; i < MAX_JOBS && !j; i++) if (jobs[i].state >= J_DONE) { j = &jobs[i]; }
+        if (!j) { show_toast(S_FAIL); return; }
+    }
+    memset(j, 0, sizeof(*j));
+    snprintf(j->url, sizeof(j->url), "%s", u);
+    snprintf(j->title, sizeof(j->title), "%s", title ? title : "");
+    snprintf(j->info, sizeof(j->info), "%s", cur_info ? cur_info : "");
+    snprintf(j->icon, sizeof(j->icon), "%s", cur_icon ? cur_icon : "");
+    job_paths(j);
+    if (!j->title[0]) snprintf(j->title, sizeof(j->title), "%s", j->name);
+    j->state = J_QUEUED; j->used = 1;
+    jobs_save();
+    show_toast(S_ADDED);
+}
+
 static void dl_poll(void) {
-    static double last_now; static u32 last_frame;
-    if (dl_active && frame_no - last_frame >= 60) {
-        double d = dl_now - last_now; dl_speed = d > 0 ? d * 60.0 / (frame_no - last_frame) : dl_speed * 0.5;
-        last_now = dl_now; last_frame = frame_no;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        Job *j = &jobs[i]; if (!j->used) continue;
+        if ((j->state == J_DOWNLOADING) && frame_no - j->last_frame >= 60) {
+            double d = j->now - j->last_now; j->speed = d > 0 ? d * 60.0 / (frame_no - j->last_frame) : j->speed * 0.5;
+            j->last_now = j->now; j->last_frame = frame_no;
+        }
+        if (j->state <= J_INSTALLING) j->notified = 0;
+        else if (!j->notified) {
+            j->notified = 1;
+            char t[400];
+            if (j->state == J_DONE) snprintf(t, sizeof(t), "%s  %s", j->title, S_INST_T);
+            else if (j->state == J_FAILED) snprintf(t, sizeof(t), "(%s)  %s  %s", j->err, j->title, S_FAIL_T);
+            else t[0] = 0;
+            if (t[0]) show_toast(t);
+        }
     }
-    if (!dl_active && dl_state) {
-        if (dl_state == 2) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_FAIL); show_toast(t); }
-        else if (dl_state == 1) ui_done = 1;
-        else if (dl_state == 5) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_BADPKG); show_toast(t); }
-        else show_toast(dl_state == 1 ? S_DONE : dl_state == 3 ? S_CANCELED : S_SPACE);
-        dl_state = 0; last_now = 0;
-    }
+    if (jobs_dirty) { jobs_dirty = 0; jobs_save(); }
 }
 
 static const char *cur_title;
@@ -589,6 +663,8 @@ static u32 pad_now, pad_prev; static int hold[32];
 #define K_L1 6
 #define K_R1 7
 #define K_START 8
+#define K_TRI 9
+#define K_SQ 10
 static void read_pad(void) {
     padInfo info; padData d; pad_prev = pad_now; pad_now = 0;
     ioPadGetInfo(&info);
@@ -604,6 +680,8 @@ static void read_pad(void) {
         if (d.BTN_L1) pad_now |= 1 << K_L1;
         if (d.BTN_R1) pad_now |= 1 << K_R1;
         if (d.BTN_START) pad_now |= 1 << K_START;
+        if (d.BTN_TRIANGLE) pad_now |= 1 << K_TRI;
+        if (d.BTN_SQUARE) pad_now |= 1 << K_SQ;
         break;
     }
 }
@@ -687,6 +765,19 @@ static void glyph_x(float cx, float cy, float r, int on_accent) {
 static void glyph_o(float cx, float cy, float r) {
     draw_circle(cx, cy, r, 0x1E2240FF); draw_ringc(cx, cy, r, 0xFF7A8AFF);
     draw_ringc(cx, cy, r * 0.5f, 0xFF7A8AFF);
+}
+static void glyph_tri(float cx, float cy, float r) {
+    draw_circle(cx, cy, r, 0x1E2240FF); draw_ringc(cx, cy, r, 0x5EE0B0FF);
+    float k = r * 0.5f, t = r * 0.13f;
+    draw_line(cx, cy - k, cx + k * 0.95f, cy + k * 0.6f, t, 0x5EE0B0FF);
+    draw_line(cx + k * 0.95f, cy + k * 0.6f, cx - k * 0.95f, cy + k * 0.6f, t, 0x5EE0B0FF);
+    draw_line(cx - k * 0.95f, cy + k * 0.6f, cx, cy - k, t, 0x5EE0B0FF);
+}
+static void glyph_sq(float cx, float cy, float r) {
+    draw_circle(cx, cy, r, 0x1E2240FF); draw_ringc(cx, cy, r, 0xE58AE6FF);
+    float k = r * 0.38f, t = r * 0.13f;
+    draw_line(cx - k, cy - k, cx + k, cy - k, t, 0xE58AE6FF); draw_line(cx + k, cy - k, cx + k, cy + k, t, 0xE58AE6FF);
+    draw_line(cx + k, cy + k, cx - k, cy + k, t, 0xE58AE6FF); draw_line(cx - k, cy + k, cx - k, cy - k, t, 0xE58AE6FF);
 }
 static void glyph_check(float cx, float cy, float s, u32 c) {
     draw_line(cx - s * 0.45f, cy, cx - s * 0.12f, cy + s * 0.33f, s * 0.16f, c);
@@ -774,6 +865,8 @@ static void draw_footer(const Hint *h, int n, const char *left) {
     for (int i = 0; i < n; i++) {
         if (h[i].kind == 0) { glyph_x(x - 8.5f, cy, 8.5f, 0); x -= 22; }
         else if (h[i].kind == 1) { glyph_o(x - 8.5f, cy, 8.5f); x -= 22; }
+        else if (h[i].kind == 3) { glyph_tri(x - 8.5f, cy, 8.5f); x -= 22; }
+        else if (h[i].kind == 4) { glyph_sq(x - 8.5f, cy, 8.5f); x -= 22; }
         else {
             float bw = text_width("L1 / R1", 8.6f) + 12;
             draw_rrect(x - bw, cy - 8, bw, 16, 4, 0x1E2240FF);
@@ -807,6 +900,31 @@ static void crumbs(int d, char *out, int n) {
     }
 }
 
+/* left side of the header: downloads button with live progress */
+static void draw_dl_pill(const char *count) {
+    int act = jobs_active();
+    Job *j = current_job;
+    char t[160];
+    if (j && j->state == J_INSTALLING) snprintf(t, sizeof(t), "%d%%  %s", j->total > 0 ? (int)(j->now * 100 / j->total) : 0, S_INSTALLING);
+    else if (j) snprintf(t, sizeof(t), "%d%%  %s", j->total > 0 ? (int)(j->now * 100 / j->total) : 0, S_DOWNLOADS);
+    else snprintf(t, sizeof(t), "%s", S_DOWNLOADS);
+    float w = text_width(t, 10) + 46, x = LX, y = 30;
+    draw_rrect(x, y, w, 28, 14, act ? 0x7C3AED33 : 0xFFFFFF0F);
+    glyph_tri(x + w - 17, y + 14, 8);
+    draw_text(t, x + 12, y + 18, 10, C_TEXT, 0);
+    if (j && j->total > 0) {
+        float pct = (float)(j->now / j->total); if (pct > 1) pct = 1;
+        draw_rrect(x + 10, y + 24, (w - 20), 2.5f, 1.2f, 0xFFFFFF22);
+        draw_rrect(x + 10 + (w - 20) * (1 - pct), y + 24, (w - 20) * pct, 2.5f, 1.2f, C_ACCENT);
+    }
+    if (act > 1) {
+        char b[8]; snprintf(b, sizeof(b), "%d", act);
+        draw_circle(x + w, y + 3, 8, 0xFF5470FF);
+        draw_text(b, x + w - text_width(b, 8.5f) / 2, y + 6, 8.5f, 0xFFFFFFFF, 0);
+    }
+    if (count) draw_text(count, x + w + 14, y + 18, 10, C_MUTED, 0);
+}
+
 static void draw_header(Level *L, const char *count) {
     if (depth == 0) {
         draw_rrect(RX - 34, 26, 34, 34, 9, C_ACCENT);
@@ -819,7 +937,7 @@ static void draw_header(Level *L, const char *count) {
         text_r(c, RX, 38, 9.3f, C_MUTED, 600);
         text_rb(L->title, RX, 60, 18.5f, C_TEXT, 600);
     }
-    if (count) text_r(count, LX + text_width(count, 10), 56, 10, C_MUTED, 0);
+    draw_dl_pill(count);
 }
 
 /* ------------------------------------------------------------------ home (top level): category tiles + preview */
@@ -876,9 +994,9 @@ static void draw_home(Level *L) {
     } else if (pv_for != L->sel) text_r(S_LOADING, RX, 340, 10, C_MUTED, 0);
     else text_r(cur->info ? cur->info : S_EMPTY, RX, 340, 10, C_MUTED, 600);
 
-    Hint h[] = { {0, S_OPENL}, {1, S_EXITL}, {2, S_NAV} };
+    Hint h[] = { {0, S_OPENL}, {1, S_EXITL}, {3, S_DOWNLOADS}, {2, S_NAV} };
     char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", L->sel + 1, L->n);
-    draw_footer(h, 3, pos);
+    draw_footer(h, 4, pos);
 }
 
 /* ------------------------------------------------------------------ grid view (sections and games) */
@@ -950,9 +1068,9 @@ static void draw_grid(Level *L) {
         glyph_x(gx - 8, by + 17, 8, 1);
         draw_text(lbl, gx - 22 - lw, by + 21.5f, 11.5f, 0xFFFFFFFF, 0);
     }
-    Hint h[] = { {0, games ? S_DLINST : S_OPENL}, {1, S_BACK}, {2, S_PAGE} };
+    Hint h[] = { {0, games ? S_DLINST : S_OPENL}, {1, S_BACK}, {3, S_DOWNLOADS}, {2, S_PAGE} };
     char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", L->n ? L->sel + 1 : 0, L->n);
-    draw_footer(h, 3, pos);
+    draw_footer(h, 4, pos);
 }
 
 /* ------------------------------------------------------------------ game page */
@@ -961,7 +1079,8 @@ static void draw_game(Level *L) {
     Node *n = &L->items[L->sel];
     draw_backdrop(n->pic ? n->pic : L->pic, 1);
     char c[600]; crumbs(depth, c, sizeof(c));
-    text_r(c, RX, 38, 9.3f, C_MUTED, 700);
+    text_r(c, RX, 38, 9.3f, C_MUTED, 560);
+    draw_dl_pill(NULL);
 
     /* cover */
     float cs = 238, cx = RX - cs, cy = 58;
@@ -1016,75 +1135,117 @@ static void draw_game(Level *L) {
         if (mt) draw_image_fit(mt, nx - s + 2, 344, s - 4, s - 4, i == L->sel ? 0xFFFFFFFF : 0xFFFFFFBB);
         nx -= s + 10;
     }
-    Hint h[] = { {0, S_DLINST}, {1, S_BACK}, {2, S_PREVNEXT} };
+    Hint h[] = { {0, S_DLINST}, {1, S_BACK}, {3, S_DOWNLOADS}, {2, S_PREVNEXT} };
     char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", L->sel + 1, L->n);
-    draw_footer(h, 3, pos);
+    draw_footer(h, 4, pos);
 }
 
-/* ------------------------------------------------------------------ download / install panel */
-static void draw_progress(void) {
-    if (!dl_active && !ui_done) return;
-    draw_quad(0, 0, SW, SH, 0x04050CE0);
-    float w = 477, h = 236, x = (SW - w) / 2, y = (SH - h) / 2 - 6, r = x + w - 26;
-    draw_rrect(x, y, w, h, 18, 0x12152EFF);
+/* ------------------------------------------------------------------ downloads screen */
+static int dl_view, dl_sel, dl_top, exit_warn;
+static int dl_order[MAX_JOBS], dl_count;
 
-    Tex *t = dl_icon[0] ? get_image(icons, ICON_SLOTS, dl_icon) : NULL;
-    draw_rrect(r - 56, y + 24, 56, 56, 11, 0x00000080);
-    if (t) draw_image_fit(t, r - 56, y + 24, 56, 56, 0xFFFFFFFF);
-    float tr = r - 68;
-    const char *st = ui_done ? S_DONE2 : dl_phase ? S_INSTALLING : S_DLING;
-    text_r(st, tr, y + 38, 10, ui_done ? C_MINT : C_GOLD, 0);
-    text_rb(dl_title, tr, y + 60, 18, C_TEXT, tr - x - 26);
-    if (dl_info[0]) text_r(dl_info, tr, y + 75, 8.6f, C_MUTED, tr - x - 26);
+/* active ones first (in queue order), then finished ones, newest first */
+static void dl_build_order(void) {
+    dl_count = 0;
+    for (int i = 0; i < MAX_JOBS; i++) if (jobs[i].used && jobs[i].state <= J_INSTALLING) dl_order[dl_count++] = i;
+    for (int i = MAX_JOBS - 1; i >= 0; i--) if (jobs[i].used && jobs[i].state > J_INSTALLING) dl_order[dl_count++] = i;
+    if (dl_sel >= dl_count) dl_sel = dl_count ? dl_count - 1 : 0;
+}
 
-    /* stepper */
-    int at = ui_done ? 3 : dl_phase ? 1 : 0;
-    const char *lbl[3] = { S_STEP1, S_STEP2, S_STEP3 };
-    float sx = r, sy = y + 108, seg = (w - 52) / 3;
-    for (int k = 0; k < 3; k++) {
-        int done = k < at, act = k == at;
-        float dcx = sx - 10.5f;
-        if (done) draw_circle(dcx, sy, 10.5f, C_OKC);
-        else if (act) { draw_circle(dcx, sy, 14, 0x7C3AED40); draw_circle(dcx, sy, 10.5f, C_ACCENT); }
-        else draw_circle(dcx, sy, 10.5f, 0xFFFFFF14);
-        if (done) glyph_check(dcx, sy, 11, 0xFFFFFFFF);
-        else { char d[4]; snprintf(d, sizeof(d), "%d", k + 1); draw_text(d, dcx - text_width(d, 10) / 2, sy + 3.6f, 10, act ? 0xFFFFFFFF : C_MUTED, 0); }
-        float lw = text_width(lbl[k], 10.5f);
-        draw_text(lbl[k], sx - 27 - lw, sy + 3.8f, 10.5f, act || done ? 0xFFFFFFFF : C_MUTED, 0);
-        if (k < 2) {
-            float l0 = sx - 33 - lw, l1 = sx - seg + 4;
-            draw_quad(l1, sy - 0.75f, l0 - l1, 1.5f, at > k ? C_OKC : 0xFFFFFF24);
+static void draw_downloads(void) {
+    dl_build_order();
+    draw_backdrop(stack[0].pic, 1);
+    char cnt[64]; snprintf(cnt, sizeof(cnt), "%s %d", S_ITEMS, dl_count);
+    text_r(S_HOME, RX, 38, 9.3f, C_MUTED, 0);
+    text_rb(S_DOWNLOADS, RX, 60, 18.5f, C_TEXT, 0);
+    draw_dl_pill(cnt);
+
+    if (!dl_count) {
+        glyph_tri(SW / 2, 220, 22);
+        text_c(S_NODL, SW / 2, 270, 13, C_SOFT, 0);
+    }
+    const float top = 92, rh = 68, gap = 8; const int vis = 5;
+    if (dl_sel < dl_top) dl_top = dl_sel;
+    if (dl_sel >= dl_top + vis) dl_top = dl_sel - vis + 1;
+    int first_done = -1;
+    for (int k = 0; k < dl_count; k++) if (jobs[dl_order[k]].state > J_INSTALLING) { first_done = k; break; }
+    for (int k = dl_top; k < dl_count && k < dl_top + vis; k++) {
+        Job *j = &jobs[dl_order[k]];
+        float y = top + (k - dl_top) * (rh + gap);
+        int f = k == dl_sel;
+        if (f) { draw_rrect(LX - 2, y - 2, RX - LX + 4, rh + 4, 14, C_ACCENT); draw_rrect(LX, y, RX - LX, rh, 12, 0x221A50FF); }
+        else draw_rrect(LX, y, RX - LX, rh, 12, k >= first_done && first_done >= 0 ? 0xFFFFFF0A : 0xFFFFFF12);
+
+        float ix = RX - 10 - 50;
+        draw_rrect(ix, y + 9, 50, 50, 9, 0x00000066);
+        Tex *t = j->icon[0] ? get_image(icons, ICON_SLOTS, j->icon) : NULL;
+        if (t) draw_image_fit(t, ix, y + 9, 50, 50, 0xFFFFFFFF);
+        float tr = ix - 12;
+
+        /* state chip on the left */
+        const char *st; u32 sc, sbg;
+        switch (j->state) {
+        case J_QUEUED:      st = S_WAITING;    sc = C_SOFT;  sbg = 0xFFFFFF14; break;
+        case J_DOWNLOADING: st = S_DLING;      sc = C_GOLD;  sbg = 0xFFD16624; break;
+        case J_INSTALLING:  st = S_INSTALLING; sc = C_GOLD;  sbg = 0xFFD16624; break;
+        case J_DONE:        st = S_INSTOK;     sc = C_MINT;  sbg = 0x2EA06733; break;
+        case J_FAILED:      st = S_FAILED;     sc = 0xFF8A9AFF; sbg = 0xFF54702E; break;
+        default:            st = S_CANCELED2;  sc = C_MUTED; sbg = 0xFFFFFF10; break;
         }
-        sx -= seg;
+        float cw = text_width(st, 9.5f) + 22;
+        draw_rrect(LX + 14, y + 22, cw, 24, 12, sbg);
+        draw_text(st, LX + 25, y + 38, 9.5f, sc, 0);
+        if (j->state == J_DONE) glyph_check(LX + 14 + cw + 12, y + 34, 12, C_MINT);
+        float maxw = tr - (LX + 14 + cw + 30);
+
+        text_rb(j->title, tr, y + 27, 13, C_TEXT, maxw);
+        char line[200];
+        if (j->state == J_DOWNLOADING || j->state == J_INSTALLING) {
+            float pct = j->total > 0 ? (float)(j->now / j->total) : 0; if (pct > 1) pct = 1;
+            if (j->state == J_DOWNLOADING && j->total > 0) snprintf(line, sizeof(line), "%d%%   %.1f / %.1f MB   \xC2\xB7   %.2f MB/s", (int)(pct * 100), j->now / 1048576.0, j->total / 1048576.0, j->speed / 1048576.0);
+            else if (j->state == J_DOWNLOADING) snprintf(line, sizeof(line), "%.1f MB   \xC2\xB7   %.2f MB/s", j->now / 1048576.0, j->speed / 1048576.0);
+            else snprintf(line, sizeof(line), "%d%%   %.1f / %.1f MB", (int)(pct * 100), j->now / 1048576.0, j->total / 1048576.0);
+            text_r(line, tr, y + 44, 9.3f, 0xCFCBE6FF, maxw);
+            float bw = maxw, bx = tr - bw;
+            draw_rrect(bx, y + 52, bw, 6, 3, 0xFFFFFF1A);
+            if (pct > 0.005f) draw_rrect(bx + bw * (1 - pct), y + 52, bw * pct, 6, 3, C_ACCENT);
+        } else if (j->state == J_FAILED && j->err[0]) {
+            snprintf(line, sizeof(line), "%s   \xC2\xB7   %s", j->err, j->info);
+            text_r(line, tr, y + 48, 9.3f, 0xFF8A9AFF, maxw);
+        } else text_r(j->info, tr, y + 48, 9.3f, C_MUTED, maxw);
+    }
+    if (dl_count > vis) {
+        float th = vis * (rh + gap) - gap, bh = th * vis / dl_count, by = top + (th - bh) * dl_top / (dl_count - vis);
+        draw_rrect(LX - 10, top, 3, th, 1.5f, 0xFFFFFF1F); draw_rrect(LX - 10, by, 3, bh, 1.5f, 0xFFFFFFAA);
     }
 
-    if (!ui_done) {
-        float pct = dl_total > 0 ? (float)(dl_now / dl_total) : 0;
-        if (pct > 1) pct = 1;
-        float bx = x + 26, bw = w - 52, by = y + 140;
-        draw_rrect(bx, by, bw, 10, 5, 0xFFFFFF1A);
-        if (pct > 0.01f) draw_rrect(bx + bw * (1 - pct), by, bw * pct, 10, 5, C_ACCENT);   /* fills from the right (RTL) */
-        char p[16], d[96];
-        snprintf(p, sizeof(p), "%d%%", (int)(pct * 100));
-        if (dl_phase) snprintf(d, sizeof(d), "%.1f / %.1f MB", dl_now / 1048576.0, dl_total / 1048576.0);
-        else if (dl_total > 0) snprintf(d, sizeof(d), "%.1f / %.1f MB   \xC2\xB7   %.2f MB/s", dl_now / 1048576.0, dl_total / 1048576.0, dl_speed / 1048576.0);
-        else snprintf(d, sizeof(d), "%.1f MB   \xC2\xB7   %.2f MB/s", dl_now / 1048576.0, dl_speed / 1048576.0);
-        draw_text(p, bx, by + 32, 14.5f, C_TEXT, 0); draw_text(p, bx + 0.5f, by + 32, 14.5f, C_TEXT, 0);
-        draw_text(d, bx + bw - text_width(d, 10.5f), by + 30, 10.5f, 0xCFCBE6FF, 0);
-    } else {
-        float bx = x + 26, bw = w - 52, by = y + 132;
-        draw_rrect(bx, by, bw, 44, 11, 0x2EA06729);
-        glyph_check(bx + bw - 22, by + 22, 14, C_MINT);
-        text_r(S_DONEMSG, bx + bw - 38, by + 26, 10.5f, C_TEXT, bw - 50);
+    Hint h[3]; int n = 0;
+    if (dl_count) {
+        Job *j = &jobs[dl_order[dl_sel]];
+        if (j->state == J_FAILED || j->state == J_CANCELED) h[n++] = (Hint){0, S_RETRY};
+        if (j->state == J_QUEUED || j->state == J_DOWNLOADING) h[n++] = (Hint){4, S_CANCEL3};
+        else if (j->state != J_INSTALLING) h[n++] = (Hint){4, S_REMOVE};
     }
+    h[n++] = (Hint){1, S_BACK};
+    char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", dl_count ? dl_sel + 1 : 0, dl_count);
+    draw_footer(h, n, pos);
+}
 
-    /* panel footer */
-    float fy = y + h - 26;
-    glyph_o(r - 8, fy, 8);
-    const char *ol = ui_done ? S_TOSTORE : dl_phase ? S_NOCANCEL : S_CANCELDL;
-    draw_text(ol, r - 22 - text_width(ol, 10), fy + 3.6f, 10, C_SOFT, 0);
-    const char *hint = ui_done ? S_PKGDEL : dl_phase ? S_KEEPON : S_TEMP;
-    text_r(hint, x + 26 + text_width(hint, 8.6f), fy + 3.2f, 8.6f, 0x8F89B3FF, 0);
+static void downloads_input(void) {
+    dl_build_order();
+    if (pressed(K_O) || pressed(K_TRI)) { dl_view = 0; return; }
+    if (!dl_count) return;
+    if (pressed(K_DOWN)) { if (dl_sel + 1 < dl_count) dl_sel++; }
+    if (pressed(K_UP)) { if (dl_sel > 0) dl_sel--; }
+    Job *j = &jobs[dl_order[dl_sel]];
+    if (pressed(K_X) && (j->state == J_FAILED || j->state == J_CANCELED)) {
+        j->err[0] = 0; j->cancel = 0; j->notified = 0; j->now = j->total = 0; j->state = J_QUEUED; jobs_save();
+    }
+    if (pressed(K_SQ)) {
+        if (j->state == J_DOWNLOADING) j->cancel = 1;
+        else if (j->state == J_QUEUED) { j->state = J_CANCELED; j->notified = 1; jobs_save(); }
+        else if (j->state != J_INSTALLING) { j->used = 0; jobs_save(); }
+    }
 }
 
 static void draw_screen(void) {
@@ -1097,7 +1258,8 @@ static void draw_screen(void) {
         return;
     }
     Level *L = &stack[depth];
-    if (gp_open && L->n) draw_game(L);
+    if (dl_view) draw_downloads();
+    else if (gp_open && L->n) draw_game(L);
     else if (depth == 0) draw_home(L);
     else draw_grid(L);
     draw_toast();
@@ -1112,9 +1274,10 @@ static void open_item(Level *L) {
 }
 
 static void handle_input(void) {
-    if (dl_active) { if (pressed(K_O)) { if (dl_phase) show_toast(S_NOCANCEL); else dl_cancel = 1; } return; }
-    if (ui_done) { if (pressed(K_O) || pressed(K_X)) ui_done = 0; return; }
+    if (exit_warn) exit_warn--;
     if (depth < 0) { if (pressed(K_O) || pressed(K_X)) running = 0; return; }
+    if (dl_view) { downloads_input(); return; }
+    if (pressed(K_TRI)) { dl_view = 1; dl_sel = 0; dl_top = 0; return; }
     Level *L = &stack[depth];
     int n = L->n;
     if (gp_open) {
@@ -1146,6 +1309,7 @@ static void handle_input(void) {
     }
     if (pressed(K_O)) {
         if (depth > 0) { free_level(&stack[depth]); depth--; }
+        else if (jobs_active() && !exit_warn) { exit_warn = 180; show_toast(S_EXITWARN); }
         else running = 0;
     }
 }
@@ -1181,6 +1345,11 @@ int main(int argc, const char *argv[]) {
     font_ok = !FT_Init_FreeType(&ft) && !FT_New_Face(ft, APPDIR "USRDIR/font.ttf", 0, &face) && !FT_Set_Pixel_Sizes(face, 0, GLYPH_PX) && atlas.mem;
     if (font_ok) preload_glyphs();
 
+    jobs_load();
+#ifndef HOST_PREVIEW
+    worker_running = 1;
+    if (sysThreadCreate(&worker_thread, worker_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) worker_running = 0;
+#endif
     if (load_level(&stack[0], ROOT_XML, ROOT_VIEW)) { depth = 0; stack[0].pic = strdup(STORE "PIC1.PNG"); enter_single_root(); }
     else free_level(&stack[0]);
 
@@ -1192,13 +1361,17 @@ int main(int argc, const char *argv[]) {
         read_pad();
         handle_input();
 #ifdef HOST_PREVIEW
-        { const char *e = getenv("FAKEDL"); if (e && frame_no == (u32)atoi(e)) { int ph = atoi(getenv("FAKEPH"));
-            snprintf(dl_title, sizeof(dl_title), "1942: Joint Strike"); snprintf(dl_info, sizeof(dl_info), "NPUB30024 - 130 MB");
-            snprintf(dl_icon, sizeof(dl_icon), "/dev_hdd0/game/VIDESTORE/USRDIR/PS3/IMAGENES/PSNSTUFF/1942 - Joint Strike.png");
-            if (ph == 2) ui_done = 1; else { dl_active = 1; dl_phase = ph; dl_now = ph ? 47.7e6 : 84.5e6; dl_total = 136.3e6; dl_speed = 5.0e6; } } }
+        { const char *e = getenv("FAKEDL"); if (e && frame_no == (u32)atoi(e)) {
+            const char *ic = "/dev_hdd0/game/VIDESTORE/USRDIR/PS3/IMAGENES/PSNSTUFF/";
+            const char *t[5] = {"1942: Joint Strike","4 Elements HD","Absolute Supercars","ACE COMBAT INFINITY","Alien Breed"};
+            const char *f[5] = {"1942 - Joint Strike.png","4 Elements HD.png","Absolute Supercars.png","Ace Combat Infinity.png","Alien Breed.png"};
+            int st[5] = {J_DOWNLOADING, J_QUEUED, J_DONE, J_FAILED, J_DONE};
+            for (int i = 0; i < 5; i++) { Job *j = &jobs[i]; memset(j, 0, sizeof(*j)); j->used = 1; j->state = st[i]; j->notified = 1;
+                snprintf(j->title, 256, "%s", t[i]); snprintf(j->info, 160, "NPUB3%04d - %d MB", 24 + i * 100, 130 + i * 300);
+                snprintf(j->icon, 384, "%s%s", ic, f[i]); snprintf(j->url, 1024, "http://x/%d.pkg", i); }
+            jobs[0].now = 84.5e6; jobs[0].total = 136.3e6; jobs[0].speed = 5.0e6; current_job = &jobs[0];
+            snprintf(jobs[3].err, 160, "HTTP 404"); } }
 #endif
-        if (!dl_active && pressed(K_START)) running = 0;
-
         tiny3d_Clear(0xFF000000, TINY3D_CLEAR_ALL);
         tiny3d_AlphaTest(1, 0x01, TINY3D_ALPHA_FUNC_GEQUAL);
         tiny3d_BlendFunc(1, TINY3D_BLEND_FUNC_SRC_RGB_SRC_ALPHA | TINY3D_BLEND_FUNC_SRC_ALPHA_SRC_ALPHA,
@@ -1206,12 +1379,12 @@ int main(int argc, const char *argv[]) {
                          TINY3D_BLEND_RGB_FUNC_ADD | TINY3D_BLEND_ALPHA_FUNC_ADD);
         tiny3d_Project2D();
         draw_screen();
-        draw_progress();
         tiny3d_Flip();
     }
 
-    dl_cancel = 1;
-    for (int i = 0; (wm_busy || dl_active) && i < 300; i++) usleep(20000);
+    worker_quit = 1;
+    for (int i = 0; (wm_busy || worker_running) && i < 300; i++) usleep(20000);
+    jobs_save();
     curl_global_cleanup();
     if (pv_for >= 0) free_level(&pv);
     while (depth >= 0) { free_level(&stack[depth]); depth--; }
