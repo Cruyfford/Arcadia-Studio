@@ -1488,6 +1488,118 @@ static int name_ok(const char *nn, const char *want) {
     return want[0] && !strcmp(nn, want) ? 2 : 0;
 }
 
+
+/* YouTube Data API v3 — metadata only, not a downloadable MP4.
+ * The key is bundled in an obfuscated form to keep it out of plain Git text.
+ * This is NOT encryption: anyone with this PKG can extract/recover its key.
+ */
+static char yt_game_id[12], yt_game_title[192];
+static void yt_token(char *out, int capacity) {
+    static const unsigned char obfuscated[] = {0xd2,0xda,0xe9,0xf2,0xc0,0xea,0xd1,0xe7,0xda,0xf9,0xdf,0xbe,0xd0,0xf4,0xe3,0xfa,0xa6,0xe2,0xe5,0xc3,0xe9,0xd8,0xa0,0xc5,0xf9,0xe4,0xea,0xab,0xe2,0xfb,0xfd,0xe6,0xcc,0xd0,0xd7,0xa6,0xa5,0xc3,0xe0};
+    const int n = (int)sizeof(obfuscated);
+    if (!out || capacity <= n) { if (out && capacity) out[0] = 0; return; }
+    for (int i = 0; i < n; i++) out[i] = (char)(obfuscated[i] ^ 0x93);
+    out[n] = 0;
+}
+/* JSON string reader which tolerates spaces after : (YouTube formats JSON this way). */
+static const char *yt_json_str(const char *p, const char *key, char *out, int n) {
+    char pat[64]; snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *q = strstr(p, pat);
+    if (!q) return NULL;
+    q += strlen(pat);
+    while (*q == ' ' || *q == '\r' || *q == '\n' || *q == '\t') q++;
+    if (*q++ != ':') return NULL;
+    while (*q == ' ' || *q == '\r' || *q == '\n' || *q == '\t') q++;
+    if (*q++ != '"') return NULL;
+    int i = 0;
+    while (*q && *q != '"' && i < n - 1) {
+        if (*q == '\\' && q[1]) {
+            q++;
+            if (*q == 'u') {
+                if (q[1] && q[2] && q[3] && q[4]) { q += 5; out[i++] = '?'; continue; }
+                return NULL;
+            }
+            if (*q == 'n' || *q == 'r' || *q == 't') { q++; out[i++] = ' '; continue; }
+        }
+        out[i++] = *q++;
+    }
+    out[i] = 0; return q;
+}
+/* An exact game name plus a narrow list of video descriptors.
+ * Does not accept a different numbered game or a Remastered edition. */
+static int yt_title_match(const char *title, const char *game) {
+    char name[180], val[320];
+    norm_name(game, name, sizeof name);
+    norm_name(title, val, sizeof val);
+    if (strlen(name) < 4) return 0;
+    const char *t = val;
+    if (!strncmp(t, "ps3", 3)) t += 3;
+    else if (!strncmp(t, "playstation3", 12)) t += 12;
+    size_t n = strlen(name);
+    if (strncmp(t, name, n)) return 0;
+    t += n;
+    static const char *descriptors[] = {
+        "officialtrailer", "gameplaytrailer", "launchtrailer",
+        "officialgameplay", "announcementtrailer",
+        "trailer", "gameplay", "teaser", "preview", "cinematic", NULL
+    };
+    int matched = 0;
+    for (int j = 0; descriptors[j]; j++) {
+        size_t m = strlen(descriptors[j]);
+        if (!strncmp(t, descriptors[j], m)) { t += m; matched = 1; break; }
+    }
+    if (!matched) return 0;
+    if (!strcmp(t, "") || !strcmp(t, "ps3") || !strcmp(t, "playstation3")
+        || !strcmp(t, "hd") || !strcmp(t, "4k") || !strcmp(t, "ps3hd")) return 1;
+    return 0;
+}
+static int yt_trusted(const char *channel) {
+    char name[120]; norm_name(channel, name, sizeof name);
+    static const char *trusted[] = {
+        "playstation", "playstationeurope", "playstationjapan",
+        "capcom", "konami", "sega", "ubisoft", "squareenix", "electronicarts",
+        "bandainamcoentertainment", "bethesda", "bethesdasoftworks", NULL
+    };
+    for (int i = 0; trusted[i]; i++) if (!strcmp(name, trusted[i])) return 1;
+    return 0;
+}
+static void youtube_find_first(const char *game) {
+    yt_game_id[0] = 0; yt_game_title[0] = 0;
+    char key[64], q[400], url[920];
+    yt_token(key, sizeof key);
+    if (!key[0]) return;
+    char search[260]; snprintf(search, sizeof search, "%s PS3 official trailer", game);
+    url_encode(search, q, sizeof q);
+    snprintf(url, sizeof url,
+        "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=10&q=%s&key=%s",
+        q, key);
+    memset(key, 0, sizeof key);
+    static char payload[256 * 1024];
+    MemBuf data = { payload, 0, sizeof payload }; payload[0] = 0;
+    if (!http_get(url, NULL, &data)) return;
+    const char *items = strstr(payload, "\"items\"");
+    if (!items) return;
+    int best = 0;
+    for (const char *p = items; (p = strstr(p, "\"videoId\"")); p++) {
+        const char *next = strstr(p + 9, "\"videoId\"");
+        char id[48], title[320], channel[160];
+        const char *id_end = yt_json_str(p, "videoId", id, sizeof id);
+        if (!id_end || strlen(id) != 11) continue;
+        const char *title_end = yt_json_str(id_end, "title", title, sizeof title);
+        if (!title_end || (next && title_end > next)) continue;
+        if (!yt_title_match(title, game)) continue;
+        const char *ch = yt_json_str(title_end, "channelTitle", channel, sizeof channel);
+        if (!ch || (next && ch > next)) channel[0] = 0;
+        int score = yt_trusted(channel) ? 2 : 1;
+        if (score > best) {
+            snprintf(yt_game_id, sizeof yt_game_id, "%s", id);
+            snprintf(yt_game_title, sizeof yt_game_title, "%s", title);
+            best = score;
+        }
+        if (best == 2) break;
+    }
+}
+
 static int rawg_trailer(const char *name, char *url, int n) {
     if (!rawg_key[0]) return 0;
     static char json[256 * 1024];
@@ -1542,8 +1654,11 @@ static void tr_entry(void *arg) {
     snprintf(tr_path, sizeof(tr_path), TR_DIR "/%s.mp4", tr_key);
     if (!file_exists(tr_path)) {
         tr_state = TR_SEARCH;
+        /* YouTube is searched FIRST via its metadata API; streaming video is not downloadable. */
+        youtube_find_first(tr_name);
+        if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
         int fails0 = http_fails;
-        /* 1) the store's own trailers (uploaded with Arcadia Studio), 2) RAWG */
+        /* PS3-playable MP4: 1) store-hosted and 2) RAWG fallback. */
         if (vid_base[0]) snprintf(url, 2048, "%s%s.mp4", vid_base, tr_key);
         if (url[0]) {
             tr_state = TR_DOWNLOAD; tr_now = tr_total = 0;
@@ -1918,7 +2033,7 @@ static void trailer_open(Node *n, const char *search) {
     key_of(n->title, n->info, tr_key, sizeof(tr_key));
     snprintf(tr_name, sizeof(tr_name), "%s", search ? search : n->title);
     snprintf(tr_title, sizeof(tr_title), "%s", has_arabic(n->title) && search ? search : n->title);
-    tr_cancel = 0; tr_err[0] = 0; tr_state = TR_SEARCH;
+    tr_cancel = 0; tr_err[0] = 0; yt_game_id[0] = 0; yt_game_title[0] = 0; tr_state = TR_SEARCH;
     if (sysThreadCreate(&tr_thread, tr_entry, NULL, 1100, 0x10000, 0, "trailer") != 0) tr_state = TR_FAIL;
 }
 
@@ -1930,7 +2045,15 @@ static int trailer_draw(void) {
         if (!player_open(tr_path)) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", tr_err, S_TR_FAIL); show_toast(t); unlink(tr_path); }
         return pl.active;
     }
-    if (tr_state == TR_NONE) { tr_state = TR_IDLE; show_toast(S_TR_NONE); return 0; }
+    if (tr_state == TR_NONE) {
+        tr_state = TR_IDLE;
+        if (yt_game_id[0]) {
+            char msg[290];
+            snprintf(msg, sizeof msg, "YouTube: %s | youtube.com/watch?v=%s | no compatible MP4", yt_game_title, yt_game_id);
+            show_toast(msg);
+        } else show_toast(S_TR_NONE);
+        return 0;
+    }
     if (tr_state == TR_FAIL) { tr_state = TR_IDLE; char t[300]; snprintf(t, sizeof(t), "(%s)  %s", tr_err, S_TR_FAIL); show_toast(t); return 0; }
     if (tr_state != TR_SEARCH && tr_state != TR_DOWNLOAD) return 0;
     draw_quad(0, 0, SW, SH, 0x04050CE6);
