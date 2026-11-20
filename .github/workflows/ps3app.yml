@@ -13,6 +13,7 @@ jobs:
       - name: Build PKG
         env: { RAWG_KEY: '${{ secrets.RAWG_KEY }}' }
         run: |
+          echo "RAWG key present: $([ -n "$RAWG_KEY" ] && echo yes || echo no)"
           docker run --rm -e RAWG_KEY -v $PWD/ps3app:/src -w /src hldtux/ps3dev:latest bash -lc 'export PS3DEV=/usr/local/ps3dev PSL1GHT=/usr/local/ps3dev; export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PATH; make pkg'
           sudo chown -R $USER ps3app
           ls -la ps3app
