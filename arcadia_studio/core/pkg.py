@@ -144,7 +144,7 @@ def build_pkg(template_pkg, src_dir, out_path, progress=None):
             for fn in files:
                 rel = (fn if rel_base == '.' else rel_base + '/' + fn).encode()
                 if rel not in known:
-                    items.append((rel, 0x80000003)); known.add(rel)
+                    items.append((rel, 0x80000001 if rel.upper().endswith(b'EBOOT.BIN') else 0x80000003)); known.add(rel)
     # drop items that no longer exist on disk
     items = [(n, fl) for n, fl in items if os.path.exists(locate(n.decode()))]
     n = len(items)

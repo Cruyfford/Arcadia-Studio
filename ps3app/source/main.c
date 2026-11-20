@@ -43,7 +43,7 @@ SYS_PROCESS_PARAM(1001, 0x100000);
 
 #define STORE      "/dev_hdd0/game/VIDESTORE/"
 #define STORE_PS3  "/dev_hdd0/game/VIDESTORE/"
-#define APPDIR     "/dev_hdd0/game/ARCD00001/"
+#define APPDIR     STORE                       /* the app lives inside the store PKG (VIDESTORE) */
 #define ROOT_XML   STORE "USRDIR/VIDEOGAMESSCZ_xmb.xml"
 #define ROOT_VIEW  "VIDEOGAMESSCZ_xmb_main"
 #define FOLDER_CLS "type:x-xmb/folder-pixmap"

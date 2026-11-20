@@ -1,7 +1,7 @@
 name: PS3 App
 on:
   push:
-    paths: ['ps3app/**', 'ps3test/**', 'ps3font/**', '.github/workflows/ps3app.yml']
+    paths: ['ps3app/**', 'ps3font/**', '.github/workflows/ps3app.yml']
   workflow_dispatch:
 permissions:
   contents: write
@@ -17,16 +17,14 @@ jobs:
           docker run --rm -e RAWG_KEY -v $PWD/ps3app:/src -w /src hldtux/ps3dev:latest bash -lc 'export PS3DEV=/usr/local/ps3dev PSL1GHT=/usr/local/ps3dev; export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PATH; make pkg'
           sudo chown -R $USER ps3app
           ls -la ps3app
-          cp ps3app/ARCADIA.pkg ARCADIA_App.pkg
-          docker run --rm -v $PWD/ps3test:/src -w /src hldtux/ps3dev:latest bash -lc 'export PS3DEV=/usr/local/ps3dev PSL1GHT=/usr/local/ps3dev; export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PATH; make pkg TEST_LIBS=0 && make pkg TEST_LIBS=1'
+          cp ps3app/build/pkg/USRDIR/EBOOT.BIN EBOOT.BIN
           docker run --rm -v $PWD/ps3font:/src -w /src hldtux/ps3dev:latest bash -lc 'export PS3DEV=/usr/local/ps3dev PSL1GHT=/usr/local/ps3dev; export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PATH; make pkg'
-          sudo chown -R $USER ps3test ps3font
+          sudo chown -R $USER ps3font
           cp ps3font/ARCFONT.pkg ARCADIA_Arabic_Font.pkg
-          cp ps3test/ARCTEST0.pkg ARCADIA_Test_A.pkg; cp ps3test/ARCTEST1.pkg ARCADIA_Test_B.pkg
       - uses: actions/upload-artifact@v4
-        with: { name: ARCADIA_App, path: ARCADIA_App.pkg }
+        with: { name: ARCADIA_EBOOT, path: EBOOT.BIN }
       - name: Release
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           gh release delete ps3app-latest -y --cleanup-tag || true
-          gh release create ps3app-latest ARCADIA_App.pkg ARCADIA_Test_A.pkg ARCADIA_Test_B.pkg ARCADIA_Arabic_Font.pkg -t "ARCADIA PS3 App" -n "Built from ${{ github.sha }}"
+          gh release create ps3app-latest EBOOT.BIN ARCADIA_Arabic_Font.pkg -t "ARCADIA PS3 App (EBOOT for the store PKG)" -n "Built from ${{ github.sha }}"

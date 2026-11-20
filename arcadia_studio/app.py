@@ -876,14 +876,33 @@ class Main(QMainWindow):
         self.apply(); self.store.save()
         self.build_source(self._build)
 
+    def _embed_app(self, tpl, ws):
+        """put the PS3 app (EBOOT.BIN) inside the store PKG; returns a note for the result message"""
+        from arcadia_studio.core.appembed import fetch_eboot, embed_app
+        from arcadia_studio.core.pkg import PkgReader
+        cache = os.path.join(os.path.expanduser('~'), '.arcadia_studio', 'app')
+        eb = fetch_eboot(cache)
+        if not eb: return '\n⚠ لم يتم تحميل برنامج أركاديا (EBOOT) - الحزمة بدون البرنامج'
+        roots = list(ws) if isinstance(ws, (list, tuple)) else [ws]
+        sfo = None
+        for rt in roots:
+            p = os.path.join(rt, 'PARAM.SFO')
+            if os.path.exists(p):
+                with open(p, 'rb') as f: sfo = f.read()
+                break
+        if sfo is None: sfo = PkgReader(tpl).read_file('PARAM.SFO')
+        embed_app(roots, sfo, eb)
+        return '\n✔ برنامج أركاديا مدمج داخل الحزمة (اضغط X على أيقونة الستور لتشغيله)'
+
     def _build(self, tpl, ws):
         out, _ = QFileDialog.getSaveFileName(self, 'حفظ الحزمة', 'ARCADIA_AR.pkg', 'PKG (*.pkg)')
         if not out: return
 
         def job(prog):
-            return build_pkg(tpl, ws, out, prog)
+            note = self._embed_app(tpl, ws)
+            return build_pkg(tpl, ws, out, prog) + (note,)
         def built(r):
-            msg = 'تم بناء الحزمة (%d ملف، %.1f ميغا)\n%s' % (r[0], r[1] / 1e6, out)
+            msg = 'تم بناء الحزمة (%d ملف، %.1f ميغا)\n%s%s' % (r[0], r[1] / 1e6, out, r[2])
             if self.ps3_ip() and QMessageBox.question(self, 'تم', msg + '\n\nإرسالها للجهاز وتثبيتها الآن؟') == QMessageBox.Yes:
                 self.send_pkg(out)
             else:
@@ -964,6 +983,7 @@ class Main(QMainWindow):
         out = os.path.join(tempfile.gettempdir(), 'ARCADIA_latest.pkg')
 
         def job(prog):
+            self._embed_app(tpl, ws)
             build_pkg(tpl, ws, out, lambda a, b: prog(a, b * 2))
             return upload_archive(item, acc, sec, out, progress=lambda a, b: prog(b + a, b * 2))
 
