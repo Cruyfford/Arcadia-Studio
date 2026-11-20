@@ -2312,8 +2312,17 @@ static void enter_single_root(void) {
     stack[0] = tmp; stack[0].pic = pic;
 }
 
+/* start-up log on a USB stick (and /dev_hdd0/tmp) so a freeze before the first picture can be traced */
+static void boot_log(const char *m) {
+    static int first = 1;
+    const char *paths[2] = { "/dev_usb000/arcadia_log.txt", "/dev_hdd0/tmp/arcadia_log.txt" };
+    for (int i = 0; i < 2; i++) { FILE *f = fopen(paths[i], first ? "w" : "a"); if (f) { fprintf(f, "%s\n", m); fclose(f); } }
+    first = 0;
+}
+
 /* start-up progress: 10 small squares, no font needed, so a hang shows where it stopped */
 static void boot_step(int k) {
+    char m[32]; snprintf(m, sizeof(m), "step %d", k); boot_log(m);
     tiny3d_Clear(0xFF05060F, TINY3D_CLEAR_ALL);
     tiny3d_AlphaTest(1, 0x01, TINY3D_ALPHA_FUNC_GEQUAL);
     tiny3d_Project2D();
@@ -2322,7 +2331,9 @@ static void boot_step(int k) {
 }
 
 int main(int argc, const char *argv[]) {
+    boot_log("main start");
     tiny3d_Init(1024 * 1024);
+    boot_log("tiny3d ok");
     boot_step(1);
     ioPadInit(7);
     sysModuleLoad(SYSMODULE_PNGDEC);
@@ -2362,6 +2373,7 @@ int main(int argc, const char *argv[]) {
     boot_step(10);
     if (load_level(&stack[0], ROOT_XML, ROOT_VIEW)) { depth = 0; stack[0].pic = strdup(STORE "PIC1.PNG"); enter_single_root(); }
     else free_level(&stack[0]);
+    boot_log("menu loaded, main loop");
 
     while (running) {
         frame_no++;
