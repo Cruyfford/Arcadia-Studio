@@ -121,6 +121,48 @@ class Rawg:
     download = ScreenScraper.download
 
 
+# ---------------------------------------------------------------- Steam store (no key; trailers of multi-platform games)
+def _norm(t):
+    t = re.sub(r'[\u2122\u00ae\u00a9]', '', (t or '').lower())
+    t = t.replace('&', 'and')
+    return re.sub(r'[^a-z0-9]', '', t)
+
+
+class Steam:
+    """trailers from the Steam store's public endpoints (storesearch + appdetails)"""
+    UA = {'User-Agent': 'Mozilla/5.0 ArcadiaStudio/1.0'}
+
+    def _json(self, url):
+        req = urllib.request.Request(url, headers=self.UA)
+        with urllib.request.urlopen(req, timeout=40) as r:
+            return json.loads(r.read().decode('utf-8', 'replace'))
+
+    def find_video(self, name, system=None):
+        q = urllib.parse.urlencode({'term': name, 'l': 'english', 'cc': 'US'})
+        items = (self._json('https://store.steampowered.com/api/storesearch/?' + q) or {}).get('items') or []
+        want = _norm(name)
+        if len(want) < 3: return None, None
+        best = None
+        for it in items:
+            n = _norm(it.get('name'))
+            if n == want: best = it; break
+            if best is None and len(want) >= 6 and (n.startswith(want) or want.startswith(n)) and abs(len(n) - len(want)) <= 12:
+                best = it
+        if not best: return None, None
+        aid = str(best['id'])
+        d = self._json('https://store.steampowered.com/api/appdetails?filters=movies&appids=' + aid).get(aid) or {}
+        for m in ((d.get('data') or {}).get('movies') or []):
+            mp4 = m.get('mp4') or {}
+            url = mp4.get('480') or mp4.get('max') or m.get('hls_h264')
+            if url: return url, best.get('name')
+        return None, None
+
+    def download(self, url, dest):
+        if '.m3u8' in url:          # HLS: ffmpeg reads it straight from the URL
+            return url
+        return ScreenScraper.download(self, url, dest)
+
+
 # ---------------------------------------------------------------- conversion
 def _split_jpegs(data):
     frames, i = [], 0
