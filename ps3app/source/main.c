@@ -1007,7 +1007,7 @@ static void draw_header(Level *L, const char *count) {
 }
 
 /* ------------------------------------------------------------------ home (top level): category tiles + preview */
-static Level pv; static int pv_for = -1, pv_rest;
+static Level pv; static int pv_for = -1, pv_rest, home_row, pv_sel, pv_first;
 static void preview_update(Level *L) {
     if (pv_for == L->sel) return;
     if (++pv_rest < 12) return;
@@ -1032,7 +1032,8 @@ static void draw_home(Level *L) {
     for (int i = home_first; i < L->n && i < home_first + vis; i++) {
         Node *n = &L->items[i]; int f = i == L->sel;
         float w = f ? fw : tw, h = f ? 134 : 118, y = base - h, ic = f ? 80 : 66;
-        if (f) { draw_rrect(x - w - 4, y - 4, w + 8, h + 8, 17, 0x7C3AED40); draw_rrect(x - w - 1.5f, y - 1.5f, w + 3, h + 3, 14, C_ACCENT); draw_rrect(x - w, y, w, h, 13, 0x2A1E5CFF); }
+        if (f && home_row == 0) { draw_rrect(x - w - 4, y - 4, w + 8, h + 8, 17, 0x7C3AED40); draw_rrect(x - w - 1.5f, y - 1.5f, w + 3, h + 3, 14, C_ACCENT); draw_rrect(x - w, y, w, h, 13, 0x2A1E5CFF); }
+        else if (f) { draw_rrect(x - w - 1.5f, y - 1.5f, w + 3, h + 3, 14, 0x7C3AED80); draw_rrect(x - w, y, w, h, 13, 0x221A48FF); }
         else draw_rrect(x - w, y, w, h, 13, 0xFFFFFF10);
         Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
         if (t) draw_image_fit(t, x - w / 2 - ic / 2, y + 9, ic, ic, 0xFFFFFFFF);
@@ -1048,9 +1049,12 @@ static void draw_home(Level *L) {
     text_r(cur->title, LX + 300, 288, 10, C_MUTED, 300);
     if (pv_for == L->sel && pv.n) {
         float cx = RX, cw = 143;
-        for (int i = 0; i < pv.n && i < 5; i++) {
+        if (pv_sel < pv_first) pv_first = pv_sel;
+        if (pv_sel >= pv_first + 5) pv_first = pv_sel - 4;
+        for (int i = pv_first; i < pv.n && i < pv_first + 5; i++) {
             Node *n = &pv.items[i];
-            draw_rrect(cx - cw, 302, cw, 79, 8, 0x0000004D);
+            if (home_row == 1 && i == pv_sel) { draw_rrect(cx - cw - 4, 298, cw + 8, 87, 11, 0x7C3AED40); draw_rrect(cx - cw - 2, 300, cw + 4, 83, 10, C_ACCENT); }
+            draw_rrect(cx - cw, 302, cw, 79, 8, home_row == 1 && i == pv_sel ? 0x2A1E5CFF : 0x0000004D);
             Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
             if (t) draw_image_fit(t, cx - cw, 302, cw, 79, 0xFFFFFFFF);
             text_rb(n->title, cx, 400, 10, C_TEXT, cw);
@@ -1060,8 +1064,10 @@ static void draw_home(Level *L) {
     } else if (pv_for != L->sel) text_r(S_LOADING, RX, 340, 10, C_MUTED, 0);
     else text_r(cur->info ? cur->info : S_EMPTY, RX, 340, 10, C_MUTED, 600);
 
-    Hint h[] = { {0, S_OPENL}, {1, S_EXITL}, {3, S_DOWNLOADS}, {2, S_NAV} };
-    char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", L->sel + 1, L->n);
+    Hint h[] = { {0, S_OPENL}, {1, home_row ? S_BACK : S_EXITL}, {3, S_DOWNLOADS}, {2, S_NAV} };
+    char pos[32];
+    if (home_row == 1 && pv_for == L->sel) snprintf(pos, sizeof(pos), "%d / %d", pv_sel + 1, pv.n);
+    else snprintf(pos, sizeof(pos), "%d / %d", L->sel + 1, L->n);
     draw_footer(h, 4, pos);
 }
 
@@ -1357,11 +1363,28 @@ static void handle_input(void) {
     }
     if (n) {
         int old = L->sel;
+        if (depth == 0 && home_row == 1) {
+            /* inside the preview row of the focused section */
+            int ready = pv_for == L->sel && pv.n;
+            if (!ready || pressed(K_UP) || pressed(K_O)) { home_row = 0; return; }
+            if (pressed(K_LEFT)) { if (pv_sel + 1 < pv.n) pv_sel++; }
+            if (pressed(K_RIGHT)) { if (pv_sel > 0) pv_sel--; }
+            if (pressed(K_R1)) { pv_sel += 5; if (pv_sel >= pv.n) pv_sel = pv.n - 1; }
+            if (pressed(K_L1)) { pv_sel -= 5; if (pv_sel < 0) pv_sel = 0; }
+            if (pressed(K_X)) {
+                int want = pv_sel, d = depth;
+                activate(&L->items[L->sel]);              /* opens the section */
+                if (depth == d + 1 && want < stack[depth].n) { stack[depth].sel = want; gp_open = 0; open_item(&stack[depth]); }
+                home_row = 0;
+            }
+            return;
+        }
         if (depth == 0) {
-            if (pressed(K_LEFT) || pressed(K_DOWN)) L->sel = (L->sel + 1) % n;
-            if (pressed(K_RIGHT) || pressed(K_UP)) L->sel = (L->sel + n - 1) % n;
+            if (pressed(K_LEFT)) L->sel = (L->sel + 1) % n;
+            if (pressed(K_RIGHT)) L->sel = (L->sel + n - 1) % n;
             if (pressed(K_R1)) { L->sel += 5; if (L->sel >= n) L->sel = n - 1; }
             if (pressed(K_L1)) { L->sel -= 5; if (L->sel < 0) L->sel = 0; }
+            if (pressed(K_DOWN) && pv_for == L->sel && pv.n) { home_row = 1; pv_sel = 0; pv_first = 0; return; }
         } else {
             if (pressed(K_LEFT)) { if (L->sel + 1 < n) L->sel++; }
             if (pressed(K_RIGHT)) { if (L->sel > 0) L->sel--; }
