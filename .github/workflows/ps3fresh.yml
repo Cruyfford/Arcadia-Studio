@@ -8,7 +8,7 @@ permissions:
   contents: write
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       PS3DEV: /usr/local/ps3dev
       PSL1GHT: /usr/local/ps3dev
