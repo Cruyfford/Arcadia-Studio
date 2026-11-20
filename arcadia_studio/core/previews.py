@@ -200,6 +200,20 @@ def to_avp(src, dest, start=0.0, seconds=SECONDS, w=W, h=H, fps=FPS, quality=6):
     return len(frames), pos
 
 
+def to_trailer_mp4(src, dest, start=0.0, seconds=180, progress=None):
+    """any video -> MP4 the ARCADIA PS3 player can play: H.264 High@4.1 up to 854x480, AAC stereo 48 kHz, moov first"""
+    cmd = [ffmpeg(), '-v', 'error', '-y', '-ss', str(start), '-i', src, '-t', str(seconds),
+           '-vf', "scale='min(854,iw)':-2,fps=30", '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.1',
+           '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-maxrate', '2500k', '-bufsize', '5000k',
+           '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000', '-movflags', '+faststart', dest + '.tmp.mp4']
+    flags = 0x08000000 if sys.platform.startswith('win') else 0
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
+    if r.returncode or not os.path.exists(dest + '.tmp.mp4'):
+        raise RuntimeError('تعذّر تحويل التريلر: ' + r.stderr.decode('utf-8', 'replace')[-300:])
+    os.replace(dest + '.tmp.mp4', dest)
+    return os.path.getsize(dest)
+
+
 def read_avp(path):
     """-> (w, h, fps, [jpeg bytes]) for previews inside the studio"""
     d = open(path, 'rb').read()

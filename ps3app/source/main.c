@@ -1556,7 +1556,18 @@ static void tr_entry(void *arg) {
     if (!file_exists(tr_path)) {
         tr_state = TR_SEARCH;
         int fails0 = http_fails;
-        rawg_trailer(tr_name, url, 2048);      /* RAWG only (no Steam lookups) */
+        /* 1) the store's own trailers (uploaded with Arcadia Studio), 2) RAWG */
+        if (vid_base[0]) snprintf(url, 2048, "%s%s.mp4", vid_base, tr_key);
+        if (url[0]) {
+            tr_state = TR_DOWNLOAD; tr_now = tr_total = 0;
+            char part0[320]; snprintf(part0, sizeof(part0), "%s.part", tr_path);
+            int ok0 = http_get_progress(url, part0);
+            if (ok0) { FILE *g = fopen(part0, "rb"); u8 h8[8] = {0}; if (g) { if (fread(h8, 1, 8, g) != 8) h8[4] = 0; fclose(g); } ok0 = !memcmp(h8 + 4, "ftyp", 4); }
+            if (ok0) { unlink(tr_path); rename(part0, tr_path); tr_cache_add(tr_key); tr_state = TR_READY; sysThreadExit(0); }
+            unlink(part0); url[0] = 0; tr_err[0] = 0; tr_state = TR_SEARCH; fails0 = http_fails;
+        }
+        if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
+        rawg_trailer(tr_name, url, 2048);
         if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
         if (!url[0]) {
             if (http_fails != fails0) { snprintf(tr_err, sizeof(tr_err), "%s", http_err); tr_state = TR_FAIL; }

@@ -107,11 +107,11 @@ class VideosPage(QWidget):
             self.e[k] = e; f.addRow(lab, e)
         v.addWidget(g)
 
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(['اللعبة', 'المفتاح', 'الحالة', 'القسم', 'ملاحظة'])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(['اللعبة', 'المفتاح', 'الحالة', 'القسم', 'ملاحظة', 'تريلر بالصوت'])
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Stretch); hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        for c in (1, 2, 4): hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        for c in (1, 2, 4, 5): hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.cellDoubleClicked.connect(lambda r, c: self.play())
@@ -130,6 +130,12 @@ class VideosPage(QWidget):
         os.makedirs(d, exist_ok=True); return d
 
     def _names_path(self): return os.path.join(self.folder, 'names.json')
+
+    @property
+    def tfolder(self):
+        d = os.path.join(self.folder, 'trailers'); os.makedirs(d, exist_ok=True); return d
+
+    def has_trailer(self, key): return os.path.exists(os.path.join(self.tfolder, key + '.mp4'))
 
     def names(self):
         try: return json.load(open(self._names_path(), encoding='utf-8'))
@@ -154,7 +160,7 @@ class VideosPage(QWidget):
         for r, g in enumerate(self.games):
             have = os.path.exists(os.path.join(self.folder, g['key'] + '.avp'))
             st = self.status.get(g['key']) or (ST_OK if have else ST_MISS)
-            for c, val in enumerate((g['title'], g['key'], st, g['path'].strip(' /'), '')):
+            for c, val in enumerate((g['title'], g['key'], st, g['path'].strip(' /'), '', '🎬 موجود' if self.has_trailer(g['key']) else '—')):
                 it = QTableWidgetItem(val); it.setData(Qt.UserRole, r); self.table.setItem(r, c, it)
         self.apply_filter(); self.count()
 
@@ -195,7 +201,10 @@ class VideosPage(QWidget):
             add(m, '⬇ جلب فيديوهات المحدد', lambda: self.fetch(sel), enabled=bool(sel))
             add(m, '⬇ جلب كل الناقص في القسم', lambda: self.fetch([g for g in self.games if not os.path.exists(os.path.join(self.folder, g['key'] + '.avp'))]))
         m.addSeparator()
-        add(m, '🎞 إضافة مقطع من ملف فيديو...', self.add_file, enabled=len(sel) >= 1)
+        add(m, '🎬 إضافة تريلر بالصوت (MP4) للعبة المحددة...', self.add_trailer, enabled=len(sel) == 1)
+        add(m, '🗑 حذف التريلر', self.delete_trailer, enabled=bool(sel))
+        m.addSeparator()
+        add(m, '🎞 إضافة مقطع قصير صامت من ملف فيديو...', self.add_file, enabled=len(sel) >= 1)
         add(m, '✏ البحث باسم آخر...', self.rename_search, enabled=len(sel) == 1)
         add(m, '▶ تشغيل الفيديو', self.play, enabled=len(sel) == 1, shortcut='Space')
         add(m, '🗑 حذف الفيديو', self.delete, enabled=bool(sel), shortcut='Delete')
@@ -242,6 +251,29 @@ class VideosPage(QWidget):
                 pv.to_avp(path, os.path.join(folder, g['key'] + '.avp'), start=start); prog(i + 1, len(sel))
             return len(sel)
         self.win.run_bg(job, lambda n: ([self.set_row(g['key'], ST_OK, 'يدوي') for g in sel], self.count()), 'جاري تحويل المقطع...')
+
+    def add_trailer(self):
+        g = self.selected()[0]
+        path, _ = QFileDialog.getOpenFileName(self, 'اختر تريلر اللعبة: ' + g['title'], '',
+                                              'Video (*.mp4 *.mkv *.webm *.avi *.mov *.m4v *.flv *.wmv *.ts);;All (*)')
+        if not path: return
+        start, ok = QInputDialog.getDouble(self, 'بداية التريلر', 'من أي ثانية يبدأ؟ (0 = من البداية)', 0, 0, 36000, 1)
+        if not ok: return
+        secs, ok = QInputDialog.getInt(self, 'طول التريلر', 'كم ثانية؟ (الحد 300)', 180, 10, 300)
+        if not ok: return
+        dest = os.path.join(self.tfolder, g['key'] + '.mp4')
+
+        def job(prog):
+            return pv.to_trailer_mp4(path, dest, start, secs)
+        self.win.run_bg(job, lambda size: (self.reload(), self.win.statusBar().showMessage(
+            '✔ تريلر %s جاهز (%.1f MB) — ارفعه من «رفع الفيديوهات إلى archive.org»' % (g['title'], size / 1048576), 12000)),
+            'جاري تجهيز التريلر...')
+
+    def delete_trailer(self):
+        for g in self.selected():
+            p = os.path.join(self.tfolder, g['key'] + '.mp4')
+            if os.path.exists(p): os.remove(p)
+        self.reload()
 
     def rename_search(self):
         g = self.selected()[0]
@@ -291,13 +323,15 @@ class VideosPage(QWidget):
         done_path = os.path.join(folder, 'uploaded.json')
         try: done = json.load(open(done_path))
         except Exception: done = {}   # noqa
-        files = [f for f in sorted(os.listdir(folder)) if f.endswith('.avp')]
-        todo = [f for f in files if done.get(f) != os.path.getsize(os.path.join(folder, f))]
+        files = [os.path.join(folder, f) for f in sorted(os.listdir(folder)) if f.endswith('.avp')]
+        files += [os.path.join(self.tfolder, f) for f in sorted(os.listdir(self.tfolder)) if f.endswith('.mp4')]
+        todo = [p for p in files if done.get(os.path.basename(p)) != os.path.getsize(p)]
 
         def job(prog):
-            for i, f in enumerate(todo):
-                upload_archive(item, acc, sec, os.path.join(folder, f), name=f, title='ARCADIA game videos')
-                done[f] = os.path.getsize(os.path.join(folder, f))
+            for i, p in enumerate(todo):
+                f = os.path.basename(p)
+                upload_archive(item, acc, sec, p, name=f, title='ARCADIA game videos')
+                done[f] = os.path.getsize(p)
                 json.dump(done, open(done_path, 'w')); prog(i + 1, len(todo))
             return len(todo)
         self.win.run_bg(job, lambda n: QMessageBox.information(self, 'archive.org', 'تم رفع %d فيديو.\nالرابط: %s\n\nاستخدم «ربط المتجر برابط الفيديوهات» ثم ابنِ المتجر.'
