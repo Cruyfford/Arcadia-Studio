@@ -514,9 +514,11 @@ static void url_filename(const char *url, char *out, int n) {
     if (j < 4 || strcasecmp(out + strlen(out) - 4, ".pkg")) strncat(out, ".pkg", n - strlen(out) - 1);
 }
 
-static const char *cur_icon;
+static const char *cur_icon, *cur_info;
+static char dl_info[256];
 static void start_download(const char *url, const char *title) {
     if (dl_active) return;
+    snprintf(dl_info, sizeof(dl_info), "%s", cur_info ? cur_info : "");
     dl_icon[0] = 0; if (cur_icon) snprintf(dl_icon, sizeof(dl_icon), "%s", cur_icon);
     snprintf(dl_url, sizeof(dl_url), "%s", url);
     for (char *c = dl_url; *c; c++) if (*c == ' ') { memmove(c + 3, c + 1, strlen(c + 1) + 1); c[0] = '%'; c[1] = '2'; c[2] = '0'; }
@@ -529,6 +531,7 @@ static void start_download(const char *url, const char *title) {
     if (sysThreadCreate(&dl_thread, dl_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) { dl_active = 0; show_toast(S_FAIL); }
 }
 
+static int ui_done;
 static void dl_poll(void) {
     static double last_now; static u32 last_frame;
     if (dl_active && frame_no - last_frame >= 60) {
@@ -537,29 +540,11 @@ static void dl_poll(void) {
     }
     if (!dl_active && dl_state) {
         if (dl_state == 2) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_FAIL); show_toast(t); }
-        else if (dl_state == 1) show_toast(S_INSTALLED);
+        else if (dl_state == 1) ui_done = 1;
         else if (dl_state == 5) { char t[300]; snprintf(t, sizeof(t), "(%s)  %s", dl_err, S_BADPKG); show_toast(t); }
         else show_toast(dl_state == 1 ? S_DONE : dl_state == 3 ? S_CANCELED : S_SPACE);
         dl_state = 0; last_now = 0;
     }
-}
-
-static void draw_download(void) {
-    if (!dl_active) return;
-    draw_quad(0, 0, SW, SH, 0x000000A0);
-    float x = 144, y = 176, w = 560, h = 160;
-    draw_quad(x, y, w, h, 0x141A3CF0); draw_quad(x, y, w, 3, 0x7C3AEDFF);
-    draw_text_shadow(dl_phase ? S_INSTALLING : S_DLING, x + 24, y + 36, 16, 0xFFD166FF, 0);
-    draw_text_shadow(dl_title, x + 24, y + 66, 15, 0xFFFFFFFF, w - 48);
-    float pct = dl_total > 0 ? (float)(dl_now / dl_total) : 0;
-    draw_quad(x + 24, y + 86, w - 48, 14, 0xFFFFFF22);
-    draw_grad(x + 24, y + 86, (w - 48) * pct, 14, 0x9F67FFFF, 0x6D28D9FF);
-    char t[128];
-    if (dl_total > 0) snprintf(t, sizeof(t), "%d%%   %.1f / %.1f MB   %.2f MB/s", (int)(pct * 100), dl_now / 1048576.0, dl_total / 1048576.0, dl_speed / 1048576.0);
-    else snprintf(t, sizeof(t), "%.1f MB   %.2f MB/s", dl_now / 1048576.0, dl_speed / 1048576.0);
-    draw_text(t, x + 24, y + 126, 13, 0xE6E6F0FF, 0);
-    if (!dl_phase) draw_text(S_CANCEL, x + w - 24 - text_width(S_CANCEL, 13), y + 126, 13, 0xFFFFFFAA, 0);
-    draw_text(dl_name, x + 24, y + 148, 10, 0xFFFFFF77, w - 48);
 }
 
 static const char *cur_title;
@@ -632,66 +617,548 @@ static int pressed(int k) {
 }
 
 /* ------------------------------------------------------------------ drawing */
-#define ROWS 7
-static void draw_screen(void) {
-    Level *L = depth >= 0 ? &stack[depth] : NULL;
-    Node *cur = (L && L->n) ? &L->items[L->sel] : NULL;
-    /* background */
-    Tex *bg = NULL;
-    if (cur && cur->pic) bg = get_image(bgs, BG_SLOTS, cur->pic);
-    if (!bg && L && L->pic) bg = get_image(bgs, BG_SLOTS, L->pic);
+/* ------------------------------------------------------------------ UI kit (design: Arcadia menus, RTL) */
+#define C_ACCENT 0x7C3AEDFF
+#define C_TEXT   0xF4F2FFFF
+#define C_MUTED  0xB9B4D6FF
+#define C_SOFT   0xDCD8F0FF
+#define C_GOLD   0xFFD166FF
+#define C_OKC    0x2EA067FF
+#define C_MINT   0x9EE6C0FF
+#define RX       806.0f      /* right content edge */
+#define LX       42.0f       /* left content edge */
+#define FOOT_Y   470.0f
+
+static Tex t_circle, t_ring;
+
+static void gen_circle(Tex *t, float thick) {
+    if (!t->mem) return;
+    u32 *p = (u32 *)t->mem; float r = 31.5f;
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) {
+            float dx = x + 0.5f - 32, dy = y + 0.5f - 32, d = sqrtf(dx * dx + dy * dy);
+            float a = r - d + 0.5f; a = a < 0 ? 0 : a > 1 ? 1 : a;
+            if (thick > 0) { float b = d - (r - thick) + 0.5f; b = b < 0 ? 0 : b > 1 ? 1 : b; a *= b; }
+            p[y * t->w + x] = ((u32)(a * 255) << 24) | 0x00FFFFFF;
+        }
+    t->used_w = 64; t->used_h = 64;
+}
+
+static void draw_circle(float cx, float cy, float rad, u32 color) {
+    draw_tex_uv(&t_circle, cx - rad, cy - rad, rad * 2, rad * 2, 0, 0, 64.0f / t_circle.w, 64.0f / t_circle.h, color);
+}
+static void draw_ringc(float cx, float cy, float rad, u32 color) {
+    draw_tex_uv(&t_ring, cx - rad, cy - rad, rad * 2, rad * 2, 0, 0, 64.0f / t_ring.w, 64.0f / t_ring.h, color);
+}
+
+static void draw_rrect(float x, float y, float w, float h, float r, u32 color) {
+    if (w <= 0 || h <= 0) return;
+    if (r * 2 > w) r = w / 2;
+    if (r * 2 > h) r = h / 2;
+    float u = 32.0f / t_circle.w, v = 32.0f / t_circle.h, u2 = 64.0f / t_circle.w, v2 = 64.0f / t_circle.h;
+    draw_tex_uv(&t_circle, x, y, r, r, 0, 0, u, v, color);
+    draw_tex_uv(&t_circle, x + w - r, y, r, r, u, 0, u2, v, color);
+    draw_tex_uv(&t_circle, x, y + h - r, r, r, 0, v, u, v2, color);
+    draw_tex_uv(&t_circle, x + w - r, y + h - r, r, r, u, v, u2, v2, color);
+    draw_quad(x + r, y, w - 2 * r, h, color);
+    draw_quad(x, y + r, r, h - 2 * r, color);
+    draw_quad(x + w - r, y + r, r, h - 2 * r, color);
+}
+
+static void draw_line(float x1, float y1, float x2, float y2, float th, u32 color) {
+    float dx = x2 - x1, dy = y2 - y1, l = sqrtf(dx * dx + dy * dy);
+    if (l <= 0) return;
+    float nx = -dy / l * th / 2, ny = dx / l * th / 2;
+    tiny3d_SetPolygon(TINY3D_QUADS);
+    tiny3d_VertexPos(x1 + nx, y1 + ny, 65535); tiny3d_VertexColor(color);
+    tiny3d_VertexPos(x2 + nx, y2 + ny, 65535); tiny3d_VertexColor(color);
+    tiny3d_VertexPos(x2 - nx, y2 - ny, 65535); tiny3d_VertexColor(color);
+    tiny3d_VertexPos(x1 - nx, y1 - ny, 65535); tiny3d_VertexColor(color);
+    tiny3d_End();
+}
+
+static void glyph_x(float cx, float cy, float r, int on_accent) {
+    if (on_accent) draw_circle(cx, cy, r, 0xFFFFFF2E);
+    else { draw_circle(cx, cy, r, 0x1E2240FF); draw_ringc(cx, cy, r, 0x7DA2FFFF); }
+    float k = r * 0.36f; u32 c = on_accent ? 0xFFFFFFFF : 0x7DA2FFFF;
+    draw_line(cx - k, cy - k, cx + k, cy + k, r * 0.16f, c);
+    draw_line(cx + k, cy - k, cx - k, cy + k, r * 0.16f, c);
+}
+static void glyph_o(float cx, float cy, float r) {
+    draw_circle(cx, cy, r, 0x1E2240FF); draw_ringc(cx, cy, r, 0xFF7A8AFF);
+    draw_ringc(cx, cy, r * 0.5f, 0xFF7A8AFF);
+}
+static void glyph_check(float cx, float cy, float s, u32 c) {
+    draw_line(cx - s * 0.45f, cy, cx - s * 0.12f, cy + s * 0.33f, s * 0.16f, c);
+    draw_line(cx - s * 0.12f, cy + s * 0.33f, cx + s * 0.5f, cy - s * 0.35f, s * 0.16f, c);
+}
+
+/* text helpers: everything in the store is stored visually, so "right aligned" just means x = right - width */
+static int has_arabic(const char *s) {
+    for (const unsigned char *p = (const unsigned char *)s; p && *p; p++)
+        if (*p == 0xEF && (p[1] == 0xBA || p[1] == 0xBB || p[1] == 0xAD || p[1] == 0xAE)) return 1;
+        else if (*p >= 0xD8 && *p <= 0xDB) return 1;
+    return 0;
+}
+
+static float glyph_adv(u32 cp, float size) { Glyph *g = glyph(cp); return g ? g->adv * size / GLYPH_PX : 0; }
+
+/* draw `s` so it ends at `right`; if longer than max_w it is cut with "…" on the side where reading ends */
+static void text_r(const char *s, float right, float y, float size, u32 color, float max_w) {
+    if (!s || !*s) return;
+    float w = text_width(s, size);
+    if (max_w <= 0 || w <= max_w) { draw_text(s, right - w, y, size, color, 0); return; }
+    float ell = glyph_adv(0x2026, size);
+    if (has_arabic(s)) {
+        /* RTL: reading ends at the left, drop glyphs from the left */
+        const char *p = s; float cut = 0;
+        while (*p && w - cut + ell > max_w) { const char *q = p; cut += glyph_adv(utf8_next(&q), size); p = q; }
+        draw_text(p, right - (w - cut), y, size, color, 0);
+        draw_text("\xE2\x80\xA6", right - (w - cut) - ell, y, size, color, 0);
+    } else {
+        draw_text(s, right - max_w, y, size, color, max_w - ell);
+        /* find drawn width */
+        const char *p = s; float acc = 0;
+        while (*p) { const char *q = p; float a = glyph_adv(utf8_next(&q), size); if (acc + a > max_w - ell) break; acc += a; p = q; }
+        draw_text("\xE2\x80\xA6", right - max_w + acc, y, size, color, 0);
+    }
+}
+static void text_rb(const char *s, float right, float y, float size, u32 color, float max_w) {
+    text_r(s, right, y, size, color, max_w); text_r(s, right - 0.5f, y, size, color, max_w);
+}
+static void text_c(const char *s, float cx, float y, float size, u32 color, float max_w) {
+    float w = text_width(s, size); if (max_w > 0 && w > max_w) w = max_w;
+    text_r(s, cx + w / 2, y, size, color, max_w);
+}
+
+/* ------------------------------------------------------------------ store helpers for the views */
+static int is_game(Node *n) { return (n->folder && strstr(n->tview, "_link")) || (!n->folder && n->link); }
+static int level_is_games(Level *L) { int g = 0; for (int i = 0; i < L->n; i++) g += is_game(&L->items[i]); return L->n && g * 2 >= L->n; }
+
+static const char *region_of(Level *L) {
+    char f[256]; int i = 0;
+    for (; L->file[i] && i < 255; i++) f[i] = (L->file[i] >= 'A' && L->file[i] <= 'Z') ? L->file[i] + 32 : L->file[i];
+    f[i] = 0;
+    const char *b = strrchr(f, '/'); b = b ? b + 1 : f;
+    if (strstr(b, "usa")) return S_USA;
+    if (strstr(b, "europ") || strstr(b, "eur")) return S_EUR;
+    if (strstr(b, "jap")) return S_JPN;
+    return NULL;
+}
+
+/* "NPUB30024 - 130 MB" -> id, size */
+static int split_info(const char *info, char *id, int idn, char *size, int sn) {
+    id[0] = size[0] = 0;
+    if (!info) return 0;
+    const char *d = strstr(info, " - ");
+    if (!d || has_arabic(info)) return 0;
+    snprintf(id, idn, "%.*s", (int)(d - info), info);
+    snprintf(size, sn, "%s", d + 3);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ shared chrome */
+static void draw_backdrop(const char *pic, int strong) {
+    Tex *bg = pic ? get_image(bgs, BG_SLOTS, pic) : NULL;
     if (bg) draw_image_fill(bg, 0, 0, SW, SH, 0xFFFFFFFF);
     else draw_grad(0, 0, SW, SH, 0x0B1A4AFF, 0x3A1060FF);
-    draw_grad(0, 0, SW, SH, 0x00000040, 0x000000B0);
+    if (strong) draw_quad(0, 0, SW, SH, 0x070914CC);
+    else draw_grad(0, 0, SW, SH, 0x0709148C, 0x070914F2);
+}
 
-    /* header */
-    draw_grad(0, 0, SW, 52, 0x000000C0, 0x00000000);
-    draw_text_shadow("ARCADIA", 24, 34, 22, 0xFFFFFFFF, 0);
-    if (L && L->title) draw_text_shadow(L->title, 150, 34, 18, 0xD8CCFFFF, 520);
-    if (!L) { draw_text_shadow(S_NOSTORE, 40, 260, 22, 0xFFFFFFFF, SW - 80); return; }
-    if (!L->n) { draw_text_shadow(S_EMPTY, 40, 260, 20, 0xFFFFFFFF, 0); }
+typedef struct { int kind; const char *label; } Hint;   /* kind: 0 X, 1 O, 2 L1/R1 */
+static void draw_footer(const Hint *h, int n, const char *left) {
+    draw_quad(0, FOOT_Y, SW, SH - FOOT_Y, 0x04050CD9);
+    draw_quad(0, FOOT_Y, SW, 1, 0xFFFFFF14);
+    float x = RX, cy = FOOT_Y + 21;
+    for (int i = 0; i < n; i++) {
+        if (h[i].kind == 0) { glyph_x(x - 8.5f, cy, 8.5f, 0); x -= 22; }
+        else if (h[i].kind == 1) { glyph_o(x - 8.5f, cy, 8.5f); x -= 22; }
+        else {
+            float bw = text_width("L1 / R1", 8.6f) + 12;
+            draw_rrect(x - bw, cy - 8, bw, 16, 4, 0x1E2240FF);
+            draw_text("L1 / R1", x - bw + 6, cy + 3.2f, 8.6f, C_TEXT, 0);
+            x -= bw + 6;
+        }
+        float w = text_width(h[i].label, 10);
+        draw_text(h[i].label, x - w, cy + 3.6f, 10, C_SOFT, 0);
+        x -= w + 22;
+    }
+    if (left) draw_text(left, LX, cy + 3.4f, 8.6f, 0x8F89B3FF, 0);
+}
 
-    /* list */
-    if (L->sel < L->top) L->top = L->sel;
-    if (L->sel >= L->top + ROWS) L->top = L->sel - ROWS + 1;
-    float y = 70, rh = 54;
-    for (int i = L->top; i < L->n && i < L->top + ROWS; i++, y += rh) {
-        Node *n = &L->items[i]; int s = i == L->sel;
-        if (s) { draw_quad(20, y - 2, 500, rh - 4, 0x7C3AEDB0); draw_quad(20, y - 2, 4, rh - 4, 0xFFFFFFFF); }
-        Tex *ic = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
-        if (ic) draw_image_fit(ic, 30, y + 2, 80, rh - 12, 0xFFFFFFFF);
-        else draw_quad(30, y + 8, 80, rh - 24, 0xFFFFFF22);
-        draw_text_shadow(n->title, 122, y + (n->info ? 21 : 30), s ? 17 : 15, s ? 0xFFFFFFFF : 0xE6E6F0FF, 390);
-        if (n->info) draw_text(n->info, 122, y + 40, 11.5f, 0xC9D3FFFF, 390);
-        if (n->folder && !strstr(n->tview, "_link")) draw_text(">", 500, y + 30, 16, 0xFFFFFF99, 0);
+static void draw_toast(void) {
+    if (toast_frames <= 0) return;
+    toast_frames--;
+    float w = text_width(toast, 10.5f) + 32; if (w > SW - 80) w = SW - 80;
+    float x = (SW - w) / 2, y = FOOT_Y - 40;
+    draw_rrect(x, y, w, 28, 14, 0x1A2150F2);
+    text_r(toast, x + w - 16, y + 18, 10.5f, C_TEXT, w - 32);
+}
+
+/* breadcrumb for level d: deepest first in visual order so it reads right-to-left */
+static void crumbs(int d, char *out, int n) {
+    out[0] = 0;
+    for (int i = d; i >= 0; i--) {
+        const char *t = i == 0 ? S_HOME : stack[i].title;
+        if (!t) continue;
+        if (out[0]) strncat(out, "  \xE2\x80\xB9  ", n - strlen(out) - 1);
+        strncat(out, t, n - strlen(out) - 1);
+    }
+}
+
+static void draw_header(Level *L, const char *count) {
+    if (depth == 0) {
+        draw_rrect(RX - 34, 26, 34, 34, 9, C_ACCENT);
+        draw_text("A", RX - 17 - text_width("A", 18) / 2, 50, 18, 0xFFFFFFFF, 0);
+        text_rb(S_APPNAME, RX - 46, 44, 18.5f, C_TEXT, 0);
+        text_r("A R C A D I A", RX - 46, 57, 8, C_MUTED, 0);
+    } else {
+        char c[600]; crumbs(depth - 1, c, sizeof(c));
+        Node *icon_src = NULL; (void)icon_src;
+        text_r(c, RX, 38, 9.3f, C_MUTED, 600);
+        text_rb(L->title, RX, 60, 18.5f, C_TEXT, 600);
+    }
+    if (count) text_r(count, LX + text_width(count, 10), 56, 10, C_MUTED, 0);
+}
+
+/* ------------------------------------------------------------------ home (top level): category tiles + preview */
+static Level pv; static int pv_for = -1, pv_rest;
+static void preview_update(Level *L) {
+    if (pv_for == L->sel) return;
+    if (++pv_rest < 12) return;
+    if (pv_for >= 0) free_level(&pv);
+    memset(&pv, 0, sizeof(pv)); pv_for = L->sel;
+    Node *n = &L->items[L->sel];
+    if (n->folder && !strstr(n->tview, "_link")) { if (!load_level(&pv, n->tfile, n->tview)) free_level(&pv); }
+}
+
+static int home_first;
+static void draw_home(Level *L) {
+    draw_backdrop(L->pic, 0);
+    char cnt[64]; snprintf(cnt, sizeof(cnt), "%s %d", S_ITEMS, L->n);
+    draw_header(L, NULL);
+    text_rb(S_SECTIONS, RX, 98, 14.5f, C_TEXT, 0);
+
+    const float gap = 12, tw = 93, fw = 109;
+    int vis = (int)((RX - LX - fw) / (tw + gap)) + 1;
+    if (L->sel < home_first) home_first = L->sel;
+    if (L->sel >= home_first + vis) home_first = L->sel - vis + 1;
+    float x = RX, base = 248;
+    for (int i = home_first; i < L->n && i < home_first + vis; i++) {
+        Node *n = &L->items[i]; int f = i == L->sel;
+        float w = f ? fw : tw, h = f ? 134 : 118, y = base - h, ic = f ? 80 : 66;
+        if (f) { draw_rrect(x - w - 4, y - 4, w + 8, h + 8, 17, 0x7C3AED40); draw_rrect(x - w - 1.5f, y - 1.5f, w + 3, h + 3, 14, C_ACCENT); draw_rrect(x - w, y, w, h, 13, 0x2A1E5CFF); }
+        else draw_rrect(x - w, y, w, h, 13, 0xFFFFFF10);
+        Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
+        if (t) draw_image_fit(t, x - w / 2 - ic / 2, y + 9, ic, ic, 0xFFFFFFFF);
+        else draw_rrect(x - w / 2 - ic / 2, y + 9, ic, ic, 10, 0xFFFFFF22);
+        text_c(n->title, x - w / 2, y + h - 12, f ? 10.5f : 9.6f, f ? 0xFFFFFFFF : C_SOFT, w - 10);
+        x -= w + gap;
+    }
+
+    /* what is inside the focused section */
+    preview_update(L);
+    Node *cur = &L->items[L->sel];
+    text_rb(S_INSIDE, RX, 288, 14.5f, C_TEXT, 0);
+    text_r(cur->title, LX + 300, 288, 10, C_MUTED, 300);
+    if (pv_for == L->sel && pv.n) {
+        float cx = RX, cw = 143;
+        for (int i = 0; i < pv.n && i < 5; i++) {
+            Node *n = &pv.items[i];
+            draw_rrect(cx - cw, 302, cw, 79, 8, 0x0000004D);
+            Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
+            if (t) draw_image_fit(t, cx - cw, 302, cw, 79, 0xFFFFFFFF);
+            text_rb(n->title, cx, 400, 10, C_TEXT, cw);
+            if (n->info) text_r(n->info, cx, 414, 8.6f, C_MUTED, cw);
+            cx -= cw + 12;
+        }
+    } else if (pv_for != L->sel) text_r(S_LOADING, RX, 340, 10, C_MUTED, 0);
+    else text_r(cur->info ? cur->info : S_EMPTY, RX, 340, 10, C_MUTED, 600);
+
+    Hint h[] = { {0, S_OPENL}, {1, S_EXITL}, {2, S_NAV} };
+    char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", L->sel + 1, L->n);
+    draw_footer(h, 3, pos);
+}
+
+/* ------------------------------------------------------------------ grid view (sections and games) */
+#define GCOLS 4
+#define GROWS 3
+#define GCELL_W 124.0f
+#define GCELL_H 112.0f
+#define GGAP 10.0f
+#define GTOP 104.0f
+#define PANEL_W 220.0f
+
+static void draw_grid(Level *L) {
+    int games = level_is_games(L);
+    draw_backdrop(L->pic, 1);
+    char cnt[64]; snprintf(cnt, sizeof(cnt), "%s %d", S_ITEMS, L->n);
+    draw_header(L, cnt);
+    if (!L->n) { text_r(S_EMPTY, RX, 250, 13, C_TEXT, 0); }
+
+    int row = L->sel / GCOLS;
+    if (row < L->top) L->top = row;
+    if (row >= L->top + GROWS) L->top = row - GROWS + 1;
+    for (int i = L->top * GCOLS; i < L->n && i < (L->top + GROWS) * GCOLS; i++) {
+        Node *n = &L->items[i]; int f = i == L->sel;
+        int c = i % GCOLS, r = i / GCOLS - L->top;
+        float x = RX - (c + 1) * GCELL_W - c * GGAP, y = GTOP + r * (GCELL_H + GGAP);
+        if (f) { draw_rrect(x - 2, y - 2, GCELL_W + 4, GCELL_H + 4, 12, C_ACCENT); draw_rrect(x, y, GCELL_W, GCELL_H, 10, 0x2A1E5CFF); }
+        else draw_rrect(x, y, GCELL_W, GCELL_H, 10, 0xFFFFFF0D);
+        Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
+        float ih = GCELL_H - 30;
+        if (t) draw_image_fit(t, x + 5, y + 5, GCELL_W - 10, ih, 0xFFFFFFFF);
+        else draw_rrect(x + 5, y + 5, GCELL_W - 10, ih, 8, 0xFFFFFF14);
+        text_r(n->title, x + GCELL_W - 6, y + GCELL_H - 9, 9.4f, f ? 0xFFFFFFFF : C_SOFT, GCELL_W - 12);
     }
     /* scroll bar */
-    if (L->n > ROWS) {
-        float th = ROWS * rh, bh = th * ROWS / L->n, by = 70 + (th - bh) * L->top / (L->n - ROWS);
-        draw_quad(526, 68, 3, th, 0xFFFFFF22); draw_quad(526, by, 3, bh, 0xFFFFFFAA);
+    int rows = (L->n + GCOLS - 1) / GCOLS;
+    if (rows > GROWS) {
+        float th = GROWS * (GCELL_H + GGAP) - GGAP, bh = th * GROWS / rows, by = GTOP + (th - bh) * L->top / (rows - GROWS);
+        float sx = RX - GCOLS * (GCELL_W + GGAP) - 2;
+        draw_rrect(sx, GTOP, 3, th, 1.5f, 0xFFFFFF1F); draw_rrect(sx, by, 3, bh, 1.5f, 0xFFFFFFAA);
     }
-    /* details of the selected item */
-    if (cur) {
-        draw_quad(548, 70, 280, 330, 0x0D1120B8);
-        Tex *ic = cur->icon ? get_image(icons, ICON_SLOTS, cur->icon) : NULL;
-        if (ic) draw_image_fit(ic, 560, 82, 256, 144, 0xFFFFFFFF);
-        draw_text_shadow(cur->title, 560, 252, 15, 0xFFFFFFFF, 256);
-        if (cur->info) draw_text(cur->info, 560, 276, 12, 0xC9D3FFFF, 256);
-        int is_dl = cur->folder && strstr(cur->tview, "_link");
-        draw_text(is_dl ? S_DL : cur->folder ? S_OPEN : (cur->link || cur->action ? S_DL : S_NOLINK), 560, 380, 14, 0xFFD166FF, 256);
-        char cnt[32]; snprintf(cnt, sizeof(cnt), "%d / %d", L->sel + 1, L->n);
-        draw_text(cnt, 760, 380, 12, 0xFFFFFF99, 0);
+
+    /* detail panel */
+    if (L->n) {
+        Node *n = &L->items[L->sel];
+        float px = LX, py = GTOP - 4, pw = PANEL_W, ph = FOOT_Y - 18 - py;
+        draw_rrect(px, py, pw, ph, 14, 0x101228E6);
+        draw_rrect(px + 12, py + 12, pw - 24, 140, 10, 0x00000059);
+        Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
+        if (t) draw_image_fit(t, px + 12, py + 12, pw - 24, 140, 0xFFFFFFFF);
+        text_rb(n->title, px + pw - 14, py + 176, 13.5f, C_TEXT, pw - 28);
+        char id[64], size[64];
+        if (is_game(n) && split_info(n->info, id, sizeof(id), size, sizeof(size))) {
+            float cx = px + pw - 14, cy = py + 190;
+            const char *chips[3] = { id, size, region_of(L) };
+            for (int k = 0; k < 3; k++) {
+                if (!chips[k]) continue;
+                float w = text_width(chips[k], 8.8f) + 14;
+                if (cx - w < px + 12) { cx = px + pw - 14; cy += 26; }
+                draw_rrect(cx - w, cy, w, 20, 6, 0xFFFFFF14);
+                draw_text(chips[k], cx - w + 7, cy + 13.6f, 8.8f, C_TEXT, 0);
+                cx -= w + 6;
+            }
+        } else if (n->info) text_r(n->info, px + pw - 14, py + 200, 9.6f, C_MUTED, pw - 28);
+        /* action button */
+        float bw = pw - 28, bx = px + 14, by = py + ph - 48;
+        draw_rrect(bx, by, bw, 34, 10, C_ACCENT);
+        const char *lbl = is_game(n) ? S_DLINST : n->folder ? S_OPENL : S_DLINST;
+        float lw = text_width(lbl, 11.5f), gx = bx + bw / 2 + (lw + 22) / 2;
+        glyph_x(gx - 8, by + 17, 8, 1);
+        draw_text(lbl, gx - 22 - lw, by + 21.5f, 11.5f, 0xFFFFFFFF, 0);
     }
-    /* footer */
-    draw_grad(0, SH - 40, SW, 40, 0x00000000, 0x000000D0);
-    draw_text(S_HINT, 24, SH - 14, 13, 0xFFFFFFCC, 0);
-    if (toast_frames > 0) {
-        toast_frames--;
-        float w = text_width(toast, 14) + 30;
-        if (w > SW - 40) w = SW - 40;
-        draw_quad((SW - w) / 2, SH - 92, w, 34, 0x1A2150F0);
-        draw_text(toast, (SW - w) / 2 + 15, SH - 70, 14, 0xFFFFFFFF, w - 30);
+    Hint h[] = { {0, games ? S_DLINST : S_OPENL}, {1, S_BACK}, {2, S_PAGE} };
+    char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", L->n ? L->sel + 1 : 0, L->n);
+    draw_footer(h, 3, pos);
+}
+
+/* ------------------------------------------------------------------ game page */
+static int gp_open;
+static void draw_game(Level *L) {
+    Node *n = &L->items[L->sel];
+    draw_backdrop(n->pic ? n->pic : L->pic, 1);
+    char c[600]; crumbs(depth, c, sizeof(c));
+    text_r(c, RX, 38, 9.3f, C_MUTED, 700);
+
+    /* cover */
+    float cs = 238, cx = RX - cs, cy = 58;
+    draw_rrect(cx, cy, cs, cs, 16, 0x00000073);
+    Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
+    if (t) draw_image_fit(t, cx + 6, cy + 6, cs - 12, cs - 12, 0xFFFFFFFF);
+
+    float r = cx - 32, mw = r - LX;
+    const char *reg = region_of(L);
+    char line[200];
+    if (reg) snprintf(line, sizeof(line), "%s  \xC2\xB7  %s", reg, S_GAME); else snprintf(line, sizeof(line), "%s", S_GAME);
+    text_r(line, r, 84, 10, C_GOLD, 0);
+    text_rb(n->title, r, 118, 27, C_TEXT, mw);
+
+    char id[64], size[64];
+    int has = split_info(n->info, id, sizeof(id), size, sizeof(size));
+    const char *lab[3] = { S_ID, S_SIZE, S_REGION };
+    const char *val[3] = { has ? id : NULL, has ? size : NULL, reg };
+    float bx = r, bw = (mw - 18) / 3;
+    for (int k = 0; k < 3; k++) {
+        draw_rrect(bx - bw, 140, bw, 50, 10, 0xFFFFFF0F);
+        text_r(lab[k], bx - 11, 157, 8.6f, C_MUTED, 0);
+        text_rb(val[k] ? val[k] : "-", bx - 11, 180, 12, C_TEXT, bw - 22);
+        bx -= bw + 9;
     }
+    if (!has && n->info) text_r(n->info, r, 210, 10, C_MUTED, mw);
+
+    /* buttons */
+    float w1 = text_width(S_DLINST, 12.5f) + 60, y = 214;
+    draw_rrect(r - w1 - 4, y - 4, w1 + 8, 48, 14, 0x7C3AED40);
+    draw_rrect(r - w1, y, w1, 40, 11, C_ACCENT);
+    glyph_x(r - 24, y + 20, 9, 1);
+    draw_text(S_DLINST, r - 40 - text_width(S_DLINST, 12.5f), y + 25, 12.5f, 0xFFFFFFFF, 0);
+    float w2 = text_width(S_BACK, 11.5f) + 52, x2 = r - w1 - 10;
+    draw_rrect(x2 - w2, y, w2, 40, 11, 0xFFFFFF14);
+    glyph_o(x2 - 22, y + 20, 8);
+    draw_text(S_BACK, x2 - 36 - text_width(S_BACK, 11.5f), y + 24.5f, 11.5f, C_TEXT, 0);
+
+    glyph_check(r - 7, 281, 12, C_MINT);
+    text_r(S_INAPP, r - 20, 285, 10, 0xCFCBE6FF, mw - 20);
+
+    /* neighbours */
+    text_rb(S_SAME, RX, 330, 10.5f, C_SOFT, 0);
+    int first = L->sel - 4; if (first < 0) first = 0;
+    if (first + 9 > L->n) first = L->n - 9 < 0 ? 0 : L->n - 9;
+    float nx = RX;
+    for (int i = first; i < L->n && i < first + 9; i++) {
+        Node *m = &L->items[i]; float s = 58;
+        if (i == L->sel) draw_rrect(nx - s - 2, 340, s + 4, s + 4, 10, C_ACCENT);
+        draw_rrect(nx - s, 342, s, s, 8, 0x000000AA);
+        Tex *mt = m->icon ? get_image(icons, ICON_SLOTS, m->icon) : NULL;
+        if (mt) draw_image_fit(mt, nx - s + 2, 344, s - 4, s - 4, i == L->sel ? 0xFFFFFFFF : 0xFFFFFFBB);
+        nx -= s + 10;
+    }
+    Hint h[] = { {0, S_DLINST}, {1, S_BACK}, {2, S_PREVNEXT} };
+    char pos[32]; snprintf(pos, sizeof(pos), "%d / %d", L->sel + 1, L->n);
+    draw_footer(h, 3, pos);
+}
+
+/* ------------------------------------------------------------------ download / install panel */
+static void draw_progress(void) {
+    if (!dl_active && !ui_done) return;
+    draw_quad(0, 0, SW, SH, 0x04050CE0);
+    float w = 477, h = 236, x = (SW - w) / 2, y = (SH - h) / 2 - 6, r = x + w - 26;
+    draw_rrect(x, y, w, h, 18, 0x12152EFF);
+
+    Tex *t = dl_icon[0] ? get_image(icons, ICON_SLOTS, dl_icon) : NULL;
+    draw_rrect(r - 56, y + 24, 56, 56, 11, 0x00000080);
+    if (t) draw_image_fit(t, r - 56, y + 24, 56, 56, 0xFFFFFFFF);
+    float tr = r - 68;
+    const char *st = ui_done ? S_DONE2 : dl_phase ? S_INSTALLING : S_DLING;
+    text_r(st, tr, y + 38, 10, ui_done ? C_MINT : C_GOLD, 0);
+    text_rb(dl_title, tr, y + 60, 18, C_TEXT, tr - x - 26);
+    if (dl_info[0]) text_r(dl_info, tr, y + 75, 8.6f, C_MUTED, tr - x - 26);
+
+    /* stepper */
+    int at = ui_done ? 3 : dl_phase ? 1 : 0;
+    const char *lbl[3] = { S_STEP1, S_STEP2, S_STEP3 };
+    float sx = r, sy = y + 108, seg = (w - 52) / 3;
+    for (int k = 0; k < 3; k++) {
+        int done = k < at, act = k == at;
+        float dcx = sx - 10.5f;
+        if (done) draw_circle(dcx, sy, 10.5f, C_OKC);
+        else if (act) { draw_circle(dcx, sy, 14, 0x7C3AED40); draw_circle(dcx, sy, 10.5f, C_ACCENT); }
+        else draw_circle(dcx, sy, 10.5f, 0xFFFFFF14);
+        if (done) glyph_check(dcx, sy, 11, 0xFFFFFFFF);
+        else { char d[4]; snprintf(d, sizeof(d), "%d", k + 1); draw_text(d, dcx - text_width(d, 10) / 2, sy + 3.6f, 10, act ? 0xFFFFFFFF : C_MUTED, 0); }
+        float lw = text_width(lbl[k], 10.5f);
+        draw_text(lbl[k], sx - 27 - lw, sy + 3.8f, 10.5f, act || done ? 0xFFFFFFFF : C_MUTED, 0);
+        if (k < 2) {
+            float l0 = sx - 33 - lw, l1 = sx - seg + 4;
+            draw_quad(l1, sy - 0.75f, l0 - l1, 1.5f, at > k ? C_OKC : 0xFFFFFF24);
+        }
+        sx -= seg;
+    }
+
+    if (!ui_done) {
+        float pct = dl_total > 0 ? (float)(dl_now / dl_total) : 0;
+        if (pct > 1) pct = 1;
+        float bx = x + 26, bw = w - 52, by = y + 140;
+        draw_rrect(bx, by, bw, 10, 5, 0xFFFFFF1A);
+        if (pct > 0.01f) draw_rrect(bx + bw * (1 - pct), by, bw * pct, 10, 5, C_ACCENT);   /* fills from the right (RTL) */
+        char p[16], d[96];
+        snprintf(p, sizeof(p), "%d%%", (int)(pct * 100));
+        if (dl_phase) snprintf(d, sizeof(d), "%.1f / %.1f MB", dl_now / 1048576.0, dl_total / 1048576.0);
+        else if (dl_total > 0) snprintf(d, sizeof(d), "%.1f / %.1f MB   \xC2\xB7   %.2f MB/s", dl_now / 1048576.0, dl_total / 1048576.0, dl_speed / 1048576.0);
+        else snprintf(d, sizeof(d), "%.1f MB   \xC2\xB7   %.2f MB/s", dl_now / 1048576.0, dl_speed / 1048576.0);
+        draw_text(p, bx, by + 32, 14.5f, C_TEXT, 0); draw_text(p, bx + 0.5f, by + 32, 14.5f, C_TEXT, 0);
+        draw_text(d, bx + bw - text_width(d, 10.5f), by + 30, 10.5f, 0xCFCBE6FF, 0);
+    } else {
+        float bx = x + 26, bw = w - 52, by = y + 132;
+        draw_rrect(bx, by, bw, 44, 11, 0x2EA06729);
+        glyph_check(bx + bw - 22, by + 22, 14, C_MINT);
+        text_r(S_DONEMSG, bx + bw - 38, by + 26, 10.5f, C_TEXT, bw - 50);
+    }
+
+    /* panel footer */
+    float fy = y + h - 26;
+    glyph_o(r - 8, fy, 8);
+    const char *ol = ui_done ? S_TOSTORE : dl_phase ? S_NOCANCEL : S_CANCELDL;
+    draw_text(ol, r - 22 - text_width(ol, 10), fy + 3.6f, 10, C_SOFT, 0);
+    const char *hint = ui_done ? S_PKGDEL : dl_phase ? S_KEEPON : S_TEMP;
+    text_r(hint, x + 26 + text_width(hint, 8.6f), fy + 3.2f, 8.6f, 0x8F89B3FF, 0);
+}
+
+static void draw_screen(void) {
+    if (depth < 0) {
+        draw_backdrop(NULL, 1);
+        text_c(S_NOSTORE, SW / 2, SH / 2, 14, C_TEXT, SW - 80);
+        Hint h[] = { {1, S_EXITL} };
+        draw_footer(h, 1, NULL);
+        draw_toast();
+        return;
+    }
+    Level *L = &stack[depth];
+    if (gp_open && L->n) draw_game(L);
+    else if (depth == 0) draw_home(L);
+    else draw_grid(L);
+    draw_toast();
+}
+
+/* ------------------------------------------------------------------ input */
+static void open_item(Level *L) {
+    Node *n = &L->items[L->sel];
+    if (is_game(n) && !gp_open) { gp_open = 1; return; }   /* a game opens its page first */
+    cur_info = n->info;
+    activate(n);
+}
+
+static void handle_input(void) {
+    if (dl_active) { if (pressed(K_O)) { if (dl_phase) show_toast(S_NOCANCEL); else dl_cancel = 1; } return; }
+    if (ui_done) { if (pressed(K_O) || pressed(K_X)) ui_done = 0; return; }
+    if (depth < 0) { if (pressed(K_O) || pressed(K_X)) running = 0; return; }
+    Level *L = &stack[depth];
+    int n = L->n;
+    if (gp_open) {
+        if (pressed(K_O)) { gp_open = 0; return; }
+        if (pressed(K_X)) { open_item(L); return; }
+        int step = 0;
+        if (pressed(K_LEFT) || pressed(K_R1)) step = 1;
+        if (pressed(K_RIGHT) || pressed(K_L1)) step = -1;
+        for (int i = L->sel + step; step && i >= 0 && i < n; i += step) if (is_game(&L->items[i])) { L->sel = i; break; }
+        return;
+    }
+    if (n) {
+        int old = L->sel;
+        if (depth == 0) {
+            if (pressed(K_LEFT) || pressed(K_DOWN)) L->sel = (L->sel + 1) % n;
+            if (pressed(K_RIGHT) || pressed(K_UP)) L->sel = (L->sel + n - 1) % n;
+            if (pressed(K_R1)) { L->sel += 5; if (L->sel >= n) L->sel = n - 1; }
+            if (pressed(K_L1)) { L->sel -= 5; if (L->sel < 0) L->sel = 0; }
+        } else {
+            if (pressed(K_LEFT)) { if (L->sel + 1 < n) L->sel++; }
+            if (pressed(K_RIGHT)) { if (L->sel > 0) L->sel--; }
+            if (pressed(K_DOWN)) { if (L->sel + GCOLS < n) L->sel += GCOLS; else if (L->sel / GCOLS < (n - 1) / GCOLS) L->sel = n - 1; }
+            if (pressed(K_UP)) { if (L->sel - GCOLS >= 0) L->sel -= GCOLS; }
+            if (pressed(K_R1)) { L->sel += GCOLS * GROWS; if (L->sel >= n) L->sel = n - 1; }
+            if (pressed(K_L1)) { L->sel -= GCOLS * GROWS; if (L->sel < 0) L->sel = 0; }
+        }
+        if (old != L->sel) pv_rest = 0;
+        if (pressed(K_X)) { int d = depth; open_item(L); if (depth != d) gp_open = 0; }
+    }
+    if (pressed(K_O)) {
+        if (depth > 0) { free_level(&stack[depth]); depth--; }
+        else running = 0;
+    }
+}
+
+/* the store root holds a single "ARCADIA" folder: start inside it */
+static void enter_single_root(void) {
+    if (depth != 0 || stack[0].n != 1 || !stack[0].items[0].folder) return;
+    Node *n = &stack[0].items[0];
+    Level tmp;
+    if (!load_level(&tmp, n->tfile, n->tview)) { free_level(&tmp); return; }
+    char *pic = stack[0].pic; stack[0].pic = NULL;
+    free_level(&stack[0]);
+    stack[0] = tmp; stack[0].pic = pic;
 }
 
 int main(int argc, const char *argv[]) {
@@ -706,13 +1173,15 @@ int main(int argc, const char *argv[]) {
     tex_pool = tiny3d_AllocTexture(tex_size); tex_used = 0;
     tex_make(&atlas, ATLAS, ATLAS_H);
     if (atlas.mem) memset(atlas.mem, 0, ATLAS * ATLAS_H * 4);
+    tex_make(&t_circle, 64, 64); gen_circle(&t_circle, 0);
+    tex_make(&t_ring, 64, 64); gen_circle(&t_ring, 4.5f);
     for (int i = 0; i < ICON_SLOTS; i++) tex_make(&icons[i].t, 320, 176);
     for (int i = 0; i < BG_SLOTS; i++) tex_make(&bgs[i].t, 960, 540);
 
     font_ok = !FT_Init_FreeType(&ft) && !FT_New_Face(ft, APPDIR "USRDIR/font.ttf", 0, &face) && !FT_Set_Pixel_Sizes(face, 0, GLYPH_PX) && atlas.mem;
     if (font_ok) preload_glyphs();
 
-    if (load_level(&stack[0], ROOT_XML, ROOT_VIEW)) { depth = 0; stack[0].pic = strdup(STORE "PIC1.PNG"); }
+    if (load_level(&stack[0], ROOT_XML, ROOT_VIEW)) { depth = 0; stack[0].pic = strdup(STORE "PIC1.PNG"); enter_single_root(); }
     else free_level(&stack[0]);
 
     while (running) {
@@ -721,21 +1190,7 @@ int main(int argc, const char *argv[]) {
         webman_poll();
         dl_poll();
         read_pad();
-        if (dl_active) { if (pressed(K_O)) { if (dl_phase) show_toast(S_NOCANCEL); else dl_cancel = 1; } }
-        else if (depth >= 0) {
-            Level *L = &stack[depth];
-            if (L->n) {
-                if (pressed(K_DOWN)) L->sel = (L->sel + 1) % L->n;
-                if (pressed(K_UP)) L->sel = (L->sel + L->n - 1) % L->n;
-                if (pressed(K_R1) || pressed(K_RIGHT)) { L->sel += ROWS; if (L->sel >= L->n) L->sel = L->n - 1; }
-                if (pressed(K_L1) || pressed(K_LEFT)) { L->sel -= ROWS; if (L->sel < 0) L->sel = 0; }
-                if (pressed(K_X)) activate(&L->items[L->sel]);
-            }
-            if (pressed(K_O)) {
-                if (depth > 0) { free_level(&stack[depth]); depth--; }
-                else running = 0;
-            }
-        } else if (pressed(K_O) || pressed(K_X)) running = 0;
+        handle_input();
         if (!dl_active && pressed(K_START)) running = 0;
 
         tiny3d_Clear(0xFF000000, TINY3D_CLEAR_ALL);
@@ -745,13 +1200,14 @@ int main(int argc, const char *argv[]) {
                          TINY3D_BLEND_RGB_FUNC_ADD | TINY3D_BLEND_ALPHA_FUNC_ADD);
         tiny3d_Project2D();
         draw_screen();
-        draw_download();
+        draw_progress();
         tiny3d_Flip();
     }
 
     dl_cancel = 1;
     for (int i = 0; (wm_busy || dl_active) && i < 300; i++) usleep(20000);
     curl_global_cleanup();
+    if (pv_for >= 0) free_level(&pv);
     while (depth >= 0) { free_level(&stack[depth]); depth--; }
     if (font_ok) { FT_Done_Face(face); FT_Done_FreeType(ft); }
     netDeinitialize();
