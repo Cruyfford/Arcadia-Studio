@@ -21,7 +21,7 @@ CFLAGS    = -O2 -Wall -mcpu=cell $(MACHDEP) $(INCLUDE)
 CXXFLAGS  = $(CFLAGS)
 LDFLAGS   = $(MACHDEP) -Wl,-Map,$(notdir $@).map
 
-LIBS      := -ltiny3d -lfreetype -lpng -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lpngdec -lsysmodule -lgcm_sys -lrsx -lsysutil -lio -lnet -lrt -llv2 -lm
+LIBS      := -ltiny3d -lfreetype -lpng -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lpngdec -ljpgdec -lsysmodule -lgcm_sys -lrsx -lsysutil -lio -lnet -lrt -llv2 -lm
 LIBDIRS   := $(PORTLIBS)
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))

@@ -21,6 +21,7 @@
 #include <sysutil/sysutil.h>
 #include <sysmodule/sysmodule.h>
 #include <pngdec/pngdec.h>
+#include <jpgdec/jpgdec.h>
 #include <tiny3d.h>
 #include <sys/stat.h>
 #include <curl/curl.h>
@@ -109,8 +110,16 @@ static ImgSlot icons[ICON_SLOTS], bgs[BG_SLOTS];
 static u32 frame_no;
 
 static int load_png_into(const char *path, Tex *t) {
+    /* many store images named .png are really JPEG: sniff the header */
     pngData png; memset(&png, 0, sizeof(png));
-    if (pngLoadFromFile(path, &png) != 0 || !png.bmp_out) return 0;
+    unsigned char sig[4] = {0};
+    FILE *sf = fopen(path, "rb"); if (!sf) return 0;
+    size_t got = fread(sig, 1, 4, sf); fclose(sf);
+    if (got >= 3 && sig[0] == 0xFF && sig[1] == 0xD8 && sig[2] == 0xFF) {
+        jpgData jd; memset(&jd, 0, sizeof(jd));
+        if (jpgLoadFromFile(path, &jd) != 0 || !jd.bmp_out) return 0;
+        png.bmp_out = jd.bmp_out; png.pitch = jd.pitch; png.width = jd.width; png.height = jd.height;
+    } else if (pngLoadFromFile(path, &png) != 0 || !png.bmp_out) return 0;
     int sw = png.width, sh = png.height;
     float sc = fminf((float)t->w / sw, (float)t->h / sh);
     if (sc > 1.0f) sc = 1.0f;
@@ -1329,6 +1338,7 @@ int main(int argc, const char *argv[]) {
     tiny3d_Init(1024 * 1024);
     ioPadInit(7);
     sysModuleLoad(SYSMODULE_PNGDEC);
+    sysModuleLoad(SYSMODULE_JPGDEC);
     netInitialize();
     curl_global_init(CURL_GLOBAL_ALL);
     sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, sys_cb, NULL);
@@ -1391,6 +1401,7 @@ int main(int argc, const char *argv[]) {
     if (font_ok) { FT_Done_Face(face); FT_Done_FreeType(ft); }
     netDeinitialize();
     sysModuleUnload(SYSMODULE_PNGDEC);
+    sysModuleUnload(SYSMODULE_JPGDEC);
     ioPadEnd();
     tiny3d_Exit();
     return 0;
