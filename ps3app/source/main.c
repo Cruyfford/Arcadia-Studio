@@ -1336,6 +1336,7 @@ static void draw_game(Level *L) {
         draw_tex_uv(vt, cx, cy, vw, vh, 0, 0, (float)vt->used_w / vt->w, (float)vt->used_h / vt->h, 0xFFFFFFFF);
         Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;      /* small cover over the corner */
         if (t) { draw_rrect(RX - 70, cy + vh - 46, 62, 62, 9, 0x000000C0); draw_image_fit(t, RX - 68, cy + vh - 44, 58, 58, 0xFFFFFFFF); }
+        text_r("RAWG.io  \xC2\xB7  ScreenScraper.fr", RX - 80, cy + vh + 16, 8, 0x8F89B3FF, 0);
     } else {
         draw_rrect(cx, cy, cs, cs, 16, 0x00000073);
         Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;

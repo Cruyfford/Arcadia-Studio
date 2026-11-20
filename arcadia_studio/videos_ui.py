@@ -25,12 +25,15 @@ class FetchThread(QThread):
     row = Signal(str, str, str)        # key, status, note
     finished_all = Signal(int, int)
 
-    def __init__(self, games, folder, creds, system, names):
+    def __init__(self, games, folder, creds, system, names, rawg_key=''):
         super().__init__(); self.games, self.folder, self.creds, self.system, self.names = games, folder, creds, system, names
+        self.rawg_key = rawg_key
         self.cancel = threading.Event()
 
     def run(self):
-        ss = pv.ScreenScraper(*self.creds)
+        sources = []
+        if self.rawg_key: sources.append(pv.Rawg(self.rawg_key))
+        if self.creds[0] and self.creds[1]: sources.append(pv.ScreenScraper(*self.creds))
         cache = {}          # search name -> mp4 path (several regions share one clip)
         src_dir = os.path.join(self.folder, '_src'); os.makedirs(src_dir, exist_ok=True)
         ok = miss = 0
@@ -44,11 +47,17 @@ class FetchThread(QThread):
             try:
                 mp4 = cache.get((name, system))
                 if not mp4:
-                    url, matched = ss.find_video(name, system)
+                    url = src = None
+                    for so in sources:
+                        try:
+                            url, matched = so.find_video(name, system)
+                        except Exception:  # noqa  (one source failing must not stop the other)
+                            url = None
+                        if url: src = so; break
                     if not url:
                         miss += 1; self.row.emit(key, ST_NONE, name); continue
                     mp4 = os.path.join(src_dir, key + '.mp4')
-                    ss.download(url, mp4); cache[(name, system)] = mp4
+                    src.download(url, mp4); cache[(name, system)] = mp4
                 pv.to_avp(mp4, dest)
                 ok += 1; self.row.emit(key, ST_OK, '')
             except Exception as e:  # noqa
@@ -89,9 +98,9 @@ class VideosPage(QWidget):
         top.addWidget(QLabel('عرض:')); top.addWidget(self.filter)
         v.addLayout(top)
 
-        g = QGroupBox('حساب ScreenScraper.fr'); f = QFormLayout(g); f.setLabelAlignment(Qt.AlignRight)
+        g = QGroupBox('مصادر الفيديو — RAWG.io (مفتاح فوري) و/أو ScreenScraper.fr'); f = QFormLayout(g); f.setLabelAlignment(Qt.AlignRight)
         self.e = {}
-        for k, lab, pw in (('ss_devid', 'Dev ID (من منتدى ScreenScraper)', False), ('ss_devpass', 'Dev Password', True),
+        for k, lab, pw in (('rawg_key', 'مفتاح RAWG (من rawg.io/apidocs)', True),('ss_devid', 'Dev ID (من منتدى ScreenScraper)', False), ('ss_devpass', 'Dev Password', True),
                            ('ss_user', 'اسم المستخدم', False), ('ss_pass', 'كلمة المرور', True)):
             e = QLineEdit(st.value(k, '') or ''); e.setEchoMode(QLineEdit.Password if pw else QLineEdit.Normal)
             e.editingFinished.connect(lambda k=k, e=e: self.win.settings.setValue(k, e.text().strip()))
@@ -183,7 +192,7 @@ class VideosPage(QWidget):
         if self.thread and self.thread.isRunning():
             add(m, '⏹ إيقاف الجلب', self.stop)
         else:
-            add(m, '⬇ جلب فيديوهات المحدد من ScreenScraper', lambda: self.fetch(sel), enabled=bool(sel))
+            add(m, '⬇ جلب فيديوهات المحدد', lambda: self.fetch(sel), enabled=bool(sel))
             add(m, '⬇ جلب كل الناقص في القسم', lambda: self.fetch([g for g in self.games if not os.path.exists(os.path.join(self.folder, g['key'] + '.avp'))]))
         m.addSeparator()
         add(m, '🎞 إضافة مقطع من ملف فيديو...', self.add_file, enabled=len(sel) >= 1)
@@ -199,17 +208,18 @@ class VideosPage(QWidget):
 
     def creds(self):
         c = tuple(self.e[k].text().strip() for k in ('ss_devid', 'ss_devpass', 'ss_user', 'ss_pass'))
+        self.rawg = self.e['rawg_key'].text().strip()
         for k, e in self.e.items(): self.win.settings.setValue(k, e.text().strip())
         return c
 
     def fetch(self, games):
         if not games: return
         c = self.creds()
-        if not c[0] or not c[1]:
-            QMessageBox.information(self, 'ScreenScraper', 'اكتب بيانات المطوّر (Dev ID و Dev Password) من منتدى screenscraper.fr، '
-                                    'واسم المستخدم وكلمة المرور لحسابك المجاني هناك.'); return
+        if not self.rawg and not (c[0] and c[1]):
+            QMessageBox.information(self, 'مصدر الفيديو', 'اكتب مفتاح RAWG (فوري ومجاني من rawg.io/apidocs)، '
+                                    'أو بيانات مطوّر ScreenScraper إذا وصلتك.'); return
         sysname = None if self.system.currentIndex() == 0 else self.system.currentText()
-        self.thread = FetchThread(games, self.folder, c, sysname, self.names())
+        self.thread = FetchThread(games, self.folder, c, sysname, self.names(), self.rawg)
         self.thread.row.connect(self.set_row)
         self.thread.finished_all.connect(lambda ok, miss: (self.count(), self.win.statusBar().showMessage(
             '✔ الفيديوهات: %d جاهزة، %d لم يُعثر عليها' % (ok, miss), 10000)))
