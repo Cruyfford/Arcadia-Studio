@@ -485,6 +485,50 @@ static void url_filename(const char *url, char *out, int n) {
     if (j < 4 || strcasecmp(out + strlen(out) - 4, ".pkg")) strncat(out, ".pkg", n - strlen(out) - 1);
 }
 
+/* fallback DNS: ask public resolvers directly over UDP when the system resolver fails (curl error 6) */
+static int dns_query(const char *server, const char *host, char *ip, int iplen) {
+    unsigned char q[512], r[512]; int n = 0;
+    static unsigned short qid = 0x4172;
+    qid++;
+    q[n++] = qid >> 8; q[n++] = qid & 255; q[n++] = 1; q[n++] = 0;   /* recursion desired */
+    q[n++] = 0; q[n++] = 1; q[n++] = 0; q[n++] = 0; q[n++] = 0; q[n++] = 0; q[n++] = 0; q[n++] = 0;
+    const char *h = host;
+    while (*h && n < 480) {
+        const char *dot = strchr(h, '.'); int l = dot ? (int)(dot - h) : (int)strlen(h);
+        if (l <= 0 || l > 63) return 0;
+        q[n++] = l; memcpy(q + n, h, l); n += l; h += l; if (*h == '.') h++;
+    }
+    q[n++] = 0; q[n++] = 0; q[n++] = 1; q[n++] = 0; q[n++] = 1;      /* type A, class IN */
+    int s = socket(AF_INET, SOCK_DGRAM, 0); if (s < 0) return 0;
+    struct timeval tv = { 3, 0 }; setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a; memset(&a, 0, sizeof(a)); a.sin_family = AF_INET; a.sin_port = htons(53); a.sin_addr.s_addr = inet_addr(server);
+    int ok = 0;
+    if (sendto(s, q, n, 0, (struct sockaddr *)&a, sizeof(a)) == n) {
+        int got = recvfrom(s, r, sizeof(r), 0, NULL, NULL);
+        if (got > 12 && r[0] == q[0] && r[1] == q[1]) {
+            int an = (r[6] << 8) | r[7], p = 12;
+            while (p < got && r[p]) p += r[p] + 1;        /* skip question name */
+            p += 5;
+            for (int i = 0; i < an && p + 12 <= got && !ok; i++) {
+                if ((r[p] & 0xC0) == 0xC0) p += 2; else { while (p < got && r[p]) p += r[p] + 1; p++; }
+                if (p + 10 > got) break;
+                int type = (r[p] << 8) | r[p + 1], rdl = (r[p + 8] << 8) | r[p + 9]; p += 10;
+                if (type == 1 && rdl == 4 && p + 4 <= got) { snprintf(ip, iplen, "%d.%d.%d.%d", r[p], r[p + 1], r[p + 2], r[p + 3]); ok = 1; }
+                p += rdl;
+            }
+        }
+    }
+    close(s);
+    return ok;
+}
+static int dns_fallback(const char *host, char *ip, int iplen) {
+    return dns_query("8.8.8.8", host, ip, iplen) || dns_query("1.1.1.1", host, ip, iplen) || dns_query("9.9.9.9", host, ip, iplen);
+}
+static void url_host(const char *url, char *host, int n) {
+    const char *p = strstr(url, "://"); p = p ? p + 3 : url;
+    int l = (int)strcspn(p, ":/?#"); snprintf(host, n, "%.*s", l, p);
+}
+
 static void job_run(Job *jb) {
     int state = J_FAILED;
     mkdir(PKG_DIR, 0777);
@@ -510,8 +554,21 @@ static void job_run(Job *jb) {
         curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
         curl_easy_setopt(c, CURLOPT_BUFFERSIZE, 512L * 1024);
         CURLcode r = curl_easy_perform(c);
+        /* resolver failed: look the host up ourselves and retry (also for redirect targets) */
+        struct curl_slist *resolve = NULL;
+        for (int tries = 0; r == CURLE_COULDNT_RESOLVE_HOST && tries < 4 && !jb->cancel && !worker_quit; tries++) {
+            char *eff = NULL, host[256], ip[32], entry[320];
+            curl_easy_getinfo(c, CURLINFO_EFFECTIVE_URL, &eff);
+            url_host(eff ? eff : jb->url, host, sizeof(host));
+            if (!host[0] || !dns_fallback(host, ip, sizeof(ip))) break;
+            snprintf(entry, sizeof(entry), "%s:80:%s", host, ip); resolve = curl_slist_append(resolve, entry);
+            snprintf(entry, sizeof(entry), "%s:443:%s", host, ip); resolve = curl_slist_append(resolve, entry);
+            curl_easy_setopt(c, CURLOPT_RESOLVE, resolve);
+            r = curl_easy_perform(c);
+        }
         long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
         curl_easy_cleanup(c);
+        if (resolve) curl_slist_free_all(resolve);
         fclose(f); f = NULL;
         if (r == CURLE_OK && code < 400) {
             unlink(jb->final_);
