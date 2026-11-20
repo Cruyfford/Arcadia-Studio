@@ -183,7 +183,7 @@ static Glyph *glyph(u32 cp) {
 
 /* render every glyph the store can use once, before the first frame */
 static void preload_glyphs(void) {
-    static const u32 ranges[][2] = { {0x20, 0x7E}, {0xA0, 0xFF}, {0x2010, 0x2027}, {0x2190, 0x2193},
+    static const u32 ranges[][2] = { {0x20, 0x7E}, {0xA0, 0xFF}, {0x2010, 0x2027}, {0x2030, 0x203A}, {0x2190, 0x2193},
         {0x0600, 0x06FF}, {0xFB50, 0xFBFF}, {0xFE70, 0xFEFF}, {0x0660, 0x0669} };
     for (unsigned r = 0; r < sizeof(ranges) / sizeof(ranges[0]); r++)
         for (u32 c = ranges[r][0]; c <= ranges[r][1]; c++)
@@ -762,7 +762,7 @@ static void draw_backdrop(const char *pic, int strong) {
     Tex *bg = pic ? get_image(bgs, BG_SLOTS, pic) : NULL;
     if (bg) draw_image_fill(bg, 0, 0, SW, SH, 0xFFFFFFFF);
     else draw_grad(0, 0, SW, SH, 0x0B1A4AFF, 0x3A1060FF);
-    if (strong) draw_quad(0, 0, SW, SH, 0x070914CC);
+    if (strong) draw_quad(0, 0, SW, SH, 0x070914DC);
     else draw_grad(0, 0, SW, SH, 0x0709148C, 0x070914F2);
 }
 
@@ -1191,6 +1191,12 @@ int main(int argc, const char *argv[]) {
         dl_poll();
         read_pad();
         handle_input();
+#ifdef HOST_PREVIEW
+        { const char *e = getenv("FAKEDL"); if (e && frame_no == (u32)atoi(e)) { int ph = atoi(getenv("FAKEPH"));
+            snprintf(dl_title, sizeof(dl_title), "1942: Joint Strike"); snprintf(dl_info, sizeof(dl_info), "NPUB30024 - 130 MB");
+            snprintf(dl_icon, sizeof(dl_icon), "/dev_hdd0/game/VIDESTORE/USRDIR/PS3/IMAGENES/PSNSTUFF/1942 - Joint Strike.png");
+            if (ph == 2) ui_done = 1; else { dl_active = 1; dl_phase = ph; dl_now = ph ? 47.7e6 : 84.5e6; dl_total = 136.3e6; dl_speed = 5.0e6; } } }
+#endif
         if (!dl_active && pressed(K_START)) running = 0;
 
         tiny3d_Clear(0xFF000000, TINY3D_CLEAR_ALL);
