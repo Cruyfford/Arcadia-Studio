@@ -11,6 +11,7 @@ import re
 import struct
 import subprocess
 import sys
+import unicodedata
 import urllib.parse
 import urllib.request
 import zlib
@@ -65,17 +66,23 @@ class ScreenScraper:
             raise RuntimeError('ScreenScraper: ' + body.strip()[:200])
 
     def find_video(self, name, system):
-        """-> (video url, matched game name) or (None, None)"""
+        """Only accept a video for the same catalog game name on the requested platform."""
         data = self._get('jeuRecherche.php', systemeid=SYSTEMS.get(system, 59), recherche=name)
         games = (data.get('response') or {}).get('jeux') or []
-        for g in games:
-            if not g or not g.get('id'): continue
-            medias = g.get('medias') or []
+        if isinstance(games, dict): games = [games]
+        for game in games:
+            if not isinstance(game, dict) or not game.get('id'): continue
+            labels = [
+                n.get('text', '') for n in (game.get('noms') or [])
+                if isinstance(n, dict)
+            ]
+            match = next((title for title in labels if exact_game_name(name, title)), None)
+            if not match: continue
+            medias = game.get('medias') or []
             for kind in ('video-normalized', 'video'):
-                for m in medias:
-                    if m.get('type') == kind and m.get('url'):
-                        names = g.get('noms') or []
-                        return m['url'], (names[0].get('text') if names else name)
+                for media in medias:
+                    if isinstance(media, dict) and media.get('type') == kind and media.get('url'):
+                        return media['url'], match
         return None, None
 
     def download(self, url, dest):
@@ -107,60 +114,34 @@ class Rawg:
             return json.loads(r.read().decode('utf-8', 'replace'))
 
     def find_video(self, name, system=None):
-        res = self._get('games', search=name, page_size=5, search_precise='true').get('results') or []
-        want = re.sub(r'[^a-z0-9]', '', name.lower())
-        res.sort(key=lambda g: 0 if re.sub(r'[^a-z0-9]', '', (g.get('name') or '').lower()) == want else 1)
-        for g in res[:1]:        # one movies call per game keeps us far below the free monthly quota
-            movies = self._get('games/%d/movies' % g['id']).get('results') or []
-            for m in movies:
-                d = m.get('data') or {}
-                url = d.get('480') or d.get('max')
-                if url: return url, g.get('name')
+        games = self._get('games', search=name, page_size=10, search_precise='true').get('results') or []
+        for game in games:
+            matched = game.get('name') or ''
+            if not exact_game_name(name, matched) or not game.get('id'):
+                continue
+            movies = self._get('games/%s/movies' % game['id']).get('results') or []
+            for movie in movies:
+                data = movie.get('data') or {}
+                url = data.get('480') or data.get('max')
+                if url: return url, matched
         return None, None
 
     download = ScreenScraper.download
 
 
-# ---------------------------------------------------------------- Steam store (no key; trailers of multi-platform games)
+# ---------------------------------------------------------------- Strict catalogue matching
 def _norm(t):
-    t = re.sub(r'[\u2122\u00ae\u00a9]', '', (t or '').lower())
+    """Normalize typography only. Preserve numbers and meaningful edition words."""
+    t = unicodedata.normalize('NFKD', (t or '').casefold())
+    t = ''.join(ch for ch in t if not unicodedata.combining(ch))
     t = t.replace('&', 'and')
     return re.sub(r'[^a-z0-9]', '', t)
 
 
-class Steam:
-    """trailers from the Steam store's public endpoints (storesearch + appdetails)"""
-    UA = {'User-Agent': 'Mozilla/5.0 ArcadiaStudio/1.0'}
-
-    def _json(self, url):
-        req = urllib.request.Request(url, headers=self.UA)
-        with urllib.request.urlopen(req, timeout=40) as r:
-            return json.loads(r.read().decode('utf-8', 'replace'))
-
-    def find_video(self, name, system=None):
-        q = urllib.parse.urlencode({'term': name, 'l': 'english', 'cc': 'US'})
-        items = (self._json('https://store.steampowered.com/api/storesearch/?' + q) or {}).get('items') or []
-        want = _norm(name)
-        if len(want) < 3: return None, None
-        best = None
-        for it in items:
-            n = _norm(it.get('name'))
-            if n == want: best = it; break
-            if best is None and len(want) >= 6 and (n.startswith(want) or want.startswith(n)) and abs(len(n) - len(want)) <= 12:
-                best = it
-        if not best: return None, None
-        aid = str(best['id'])
-        d = self._json('https://store.steampowered.com/api/appdetails?filters=movies&appids=' + aid).get(aid) or {}
-        for m in ((d.get('data') or {}).get('movies') or []):
-            mp4 = m.get('mp4') or {}
-            url = mp4.get('480') or mp4.get('max') or m.get('hls_h264')
-            if url: return url, best.get('name')
-        return None, None
-
-    def download(self, url, dest):
-        if '.m3u8' in url:          # HLS: ffmpeg reads it straight from the URL
-            return url
-        return ScreenScraper.download(self, url, dest)
+def exact_game_name(requested, candidate):
+    """Never use partial names: '1942' cannot match '1943', nor sequels/remasters."""
+    wanted = _norm(requested)
+    return len(wanted) >= 3 and wanted == _norm(candidate)
 
 
 # ---------------------------------------------------------------- conversion

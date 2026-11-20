@@ -1,4 +1,4 @@
-"""🎬 Game videos page: short clips (20 s, 320x180, no sound) shown on the game page of the PS3 app.
+"""🎬 Game videos page: strictly-matched videos; silent AVP previews and PS3-ready MP4 with audio.
 Everything happens from the right-click menu, like the rest of the studio."""
 import json
 import os
@@ -32,15 +32,21 @@ class FetchThread(QThread):
 
     def run(self):
         sources = []
-        if self.rawg_key: sources.append(pv.Rawg(self.rawg_key))
+        # Platform-specific ScreenScraper first; RAWG only after exact name verification.
         if self.creds[0] and self.creds[1]: sources.append(pv.ScreenScraper(*self.creds))
+        if self.rawg_key: sources.append(pv.Rawg(self.rawg_key))
         cache = {}          # search name -> mp4 path (several regions share one clip)
         src_dir = os.path.join(self.folder, '_src'); os.makedirs(src_dir, exist_ok=True)
         ok = miss = 0
         for g in self.games:
             if self.cancel.is_set(): break
-            key = g['key']; dest = os.path.join(self.folder, key + '.avp')
-            if os.path.exists(dest): ok += 1; self.row.emit(key, ST_OK, ''); continue
+            key = g['key']
+            dest = os.path.join(self.folder, key + '.avp')
+            trailer = os.path.join(self.folder, 'trailers', key + '.mp4')
+            if os.path.exists(dest) and os.path.exists(trailer):
+                ok += 1
+                self.row.emit(key, ST_OK, 'صوت + فيديو')
+                continue
             name = self.names.get(key) or g['search']
             system = self.system or pv.guess_system(g['path'])
             self.row.emit(key, ST_WORK, name)
@@ -48,18 +54,32 @@ class FetchThread(QThread):
                 mp4 = cache.get((name, system))
                 if not mp4:
                     url = src = None
+                    matched = None
                     for so in sources:
                         try:
                             url, matched = so.find_video(name, system)
-                        except Exception:  # noqa  (one source failing must not stop the other)
-                            url = None
-                        if url: src = so; break
+                        except Exception:  # one source failing must not stop the other
+                            url = matched = None
+                        # No first-result guess: the source's returned catalogue name
+                        # must match the exact requested game name.
+                        if url and pv.exact_game_name(name, matched):
+                            src = so
+                            break
+                        url = None
                     if not url:
-                        miss += 1; self.row.emit(key, ST_NONE, name); continue
+                        miss += 1
+                        self.row.emit(key, ST_NONE, 'اسم اللعبة غير مطابق أو لا يوجد فيديو')
+                        continue
                     mp4 = os.path.join(src_dir, key + '.mp4')
-                    src.download(url, mp4); cache[(name, system)] = mp4
-                pv.to_avp(mp4, dest)
-                ok += 1; self.row.emit(key, ST_OK, '')
+                    mp4 = src.download(url, mp4)
+                    cache[(name, system)] = mp4
+                if not os.path.exists(dest):
+                    pv.to_avp(mp4, dest)
+                if not os.path.exists(trailer):
+                    os.makedirs(os.path.dirname(trailer), exist_ok=True)
+                    pv.to_trailer_mp4(mp4, trailer)
+                ok += 1
+                self.row.emit(key, ST_OK, 'تطابق مؤكد — فيديو بصوت')
             except Exception as e:  # noqa
                 self.row.emit(key, ST_ERR, str(e)[:160])
         self.finished_all.emit(ok, miss)
@@ -86,7 +106,7 @@ class VideosPage(QWidget):
         self.games = []; self.status = {}; self.thread = None
         v = QVBoxLayout(self); v.setContentsMargins(20, 16, 20, 12)
         t = QLabel('🎬 فيديوهات الألعاب'); t.setStyleSheet('font-size:22px;font-weight:bold'); v.addWidget(t)
-        sub = QLabel('مقاطع قصيرة (20 ثانية، بدون صوت) تظهر في صفحة اللعبة داخل تطبيق أركاديا على الجهاز.')
+        sub = QLabel('فيديوهات الألعاب: مطابقة الاسم الكامل، فيديو MP4 بالصوت ومقطع معاينة AVP صامت لجهاز PS3.')
         sub.setStyleSheet('color:#9aa6d8'); v.addWidget(sub)
 
         top = QHBoxLayout()
@@ -199,7 +219,7 @@ class VideosPage(QWidget):
             add(m, '⏹ إيقاف الجلب', self.stop)
         else:
             add(m, '⬇ جلب فيديوهات المحدد', lambda: self.fetch(sel), enabled=bool(sel))
-            add(m, '⬇ جلب كل الناقص في القسم', lambda: self.fetch([g for g in self.games if not os.path.exists(os.path.join(self.folder, g['key'] + '.avp'))]))
+            add(m, '⬇ جلب كل الناقص في القسم', lambda: self.fetch([g for g in self.games if not (os.path.exists(os.path.join(self.folder, g['key'] + '.avp')) and self.has_trailer(g['key']))]))
         m.addSeparator()
         add(m, '🎬 إضافة تريلر بالصوت (MP4) للعبة المحددة...', self.add_trailer, enabled=len(sel) == 1)
         add(m, '🗑 حذف التريلر', self.delete_trailer, enabled=bool(sel))

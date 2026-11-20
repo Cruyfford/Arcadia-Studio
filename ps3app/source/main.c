@@ -1414,7 +1414,7 @@ static void video_init(void) {
 }
 
 /* ------------------------------------------------------------------ trailer player: MP4 (H.264 via the PS3 hardware decoder, AAC via faad2) */
-#define TR_DIR APPDIR "USRDIR/trailers"
+#define TR_DIR APPDIR "USRDIR/trailers-verified-v2"
 enum { TR_IDLE, TR_SEARCH, TR_DOWNLOAD, TR_READY, TR_NONE, TR_FAIL };
 static volatile int tr_state, tr_cancel;
 static volatile double tr_now, tr_total;
@@ -1483,22 +1483,9 @@ static void norm_name(const char *s, char *o, int n) {
     o[j] = 0;
 }
 
-/* same game? exact name, or the name plus only edition words ("Director's Cut Edition", "GOTY", "Remastered"...) */
+/* Only the exact normalized catalogue title may supply a trailer; never guess a sequel or a remaster. */
 static int name_ok(const char *nn, const char *want) {
-    size_t lw = strlen(want);
-    if (!strcmp(nn, want)) return 2;
-    if (lw < 4 || strncmp(nn, want, lw)) return 0;
-    static const char *words[] = { "the", "directorscut", "directors", "cut", "edition", "complete", "goty", "gameoftheyear",
-        "definitive", "remastered", "remaster", "hd", "deluxe", "ultimate", "gold", "collection", "enhanced", "special",
-        "anniversary", "classic", "classics", "standard", "digital", "premium", "royal", "legacy", "redux", "dx", "plus",
-        "for", "pc", "windows", "steam", "complete", "bundle", "trilogy", "x", "s", NULL };
-    const char *r = nn + lw;
-    while (*r) {
-        int hit = 0;
-        for (int i = 0; words[i]; i++) { size_t l = strlen(words[i]); if (!strncmp(r, words[i], l)) { r += l; hit = 1; break; } }
-        if (!hit) return 0;
-    }
-    return 1;
+    return want[0] && !strcmp(nn, want) ? 2 : 0;
 }
 
 static int rawg_trailer(const char *name, char *url, int n) {
