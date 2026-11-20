@@ -1600,39 +1600,143 @@ static void youtube_find_first(const char *game) {
     }
 }
 
-static int rawg_trailer(const char *name, char *url, int n) {
-    if (!rawg_key[0]) return 0;
-    static char json[256 * 1024];
-    char q[400], u[700];
-    url_encode(name, q, sizeof(q));
-    snprintf(u, sizeof(u), "https://api.rawg.io/api/games?key=%s&search=%s&page_size=5&search_precise=true", rawg_key, q);
-    MemBuf m = { json, 0, sizeof(json) }; json[0] = 0;
-    if (!http_get(u, NULL, &m)) return 0;
-    const char *r = strstr(json, "\"results\":["); if (!r) return 0;
-    char want[200], nm[300], nn[300]; norm_name(name, want, sizeof(want));
-    long id = 0; int best = 0;
-    /* each result: "id":N,"slug":"...","name":"..." */
-    for (const char *p = r; (p = strstr(p, "\"slug\":\"")); ) {
-        /* only top-level results look like {"id":123,"slug":"..","name":".."} */
-        const char *idp = p; int steps = 0; while (idp > r && strncmp(idp, "\"id\":", 5) && steps++ < 24) idp--;
-        long rid = 0;
-        if (idp > r && !strncmp(idp, "\"id\":", 5)) {
-            const char *d = idp + 5; while (d < p && *d >= '0' && *d <= '9') d++;
-            if (*d == ',' && d + 1 == p) rid = atol(idp + 5);
+
+/* RAWG JSON responses are not required to be minified.
+ * Scan complete top-level game result objects to keep name + id from the SAME game. */
+static const char *rj_value(const char *start, const char *end, const char *key) {
+    char needle[80]; snprintf(needle, sizeof needle, "\"%s\"", key);
+    size_t len = strlen(needle);
+    for (const char *p = start; p && (!end || p < end); ) {
+        p = strstr(p, needle);
+        if (!p || (end && p >= end)) break;
+        p += len;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p == ':') {
+            p++;
+            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+            if (!end || p < end) return p;
         }
-        if (!rid) { p += 8; continue; }
-        const char *after = json_str(p, "name", nm, sizeof(nm)); if (!after) break;
-        norm_name(nm, nn, sizeof(nn));
-        int k = name_ok(nn, want);
-        if (k > best && rid) { best = k; id = rid; if (k == 2) break; }
-        p = after;
     }
-    if (!id) return 0;
-    snprintf(u, sizeof(u), "https://api.rawg.io/api/games/%ld/movies?key=%s", id, rawg_key);
+    return NULL;
+}
+static int rj_string(const char *start, const char *end, const char *key, char *out, int cap) {
+    const char *p = rj_value(start, end, key);
+    if (!p || *p++ != '"' || cap < 2) return 0;
+    int i = 0;
+    while (*p && (!end || p < end) && *p != '"' && i < cap - 1) {
+        if (*p == '\\' && p[1]) {
+            p++;
+            if (*p == 'u' && p[1] && p[2] && p[3] && p[4]) { p += 5; out[i++] = '?'; continue; }
+            if (*p == 'n' || *p == 'r' || *p == 't') { p++; out[i++] = ' '; continue; }
+        }
+        out[i++] = *p++;
+    }
+    out[i] = 0;
+    return *p == '"';
+}
+static long rj_long(const char *start, const char *end, const char *key) {
+    const char *p = rj_value(start, end, key);
+    if (!p || *p < '0' || *p > '9') return 0;
+    return atol(p);
+}
+/* Finds a JSON object's real end while respecting quoted strings and escaped quotes. */
+static const char *rj_object_end(const char *p) {
+    int depth = 0, quote = 0, escape = 0;
+    for (; *p; ++p) {
+        if (quote) {
+            if (escape) escape = 0;
+            else if (*p == '\\') escape = 1;
+            else if (*p == '"') quote = 0;
+        } else if (*p == '"') quote = 1;
+        else if (*p == '{') depth++;
+        else if (*p == '}' && --depth == 0) return p + 1;
+    }
+    return NULL;
+}
+static int rawg_trailer(const char *name, char *url, int n) {
+    url[0] = 0;
+    if (!rawg_key[0]) {
+        snprintf(tr_err, sizeof tr_err, "RAWG key missing; add a hosted MP4 to the store");
+        return 0;
+    }
+    static char json[256 * 1024];
+    char q[400], api[700], wanted[200];
+    url_encode(name, q, sizeof q);
+    norm_name(name, wanted, sizeof wanted);
+    snprintf(api, sizeof api,
+        "https://api.rawg.io/api/games?key=%s&search=%s&page_size=10&search_precise=true",
+        rawg_key, q);
+    MemBuf m = { json, 0, sizeof json }; json[0] = 0;
+    if (!http_get(api, NULL, &m)) return 0;
+    const char *results = rj_value(json, NULL, "results");
+    if (!results || *results != '[') return 0;
+    const char *cursor = results + 1;
+    long game_id = 0;
+    for (int i = 0; i < 10; ++i) {
+        while (*cursor == ' ' || *cursor == '\n' || *cursor == '\t'
+               || *cursor == '\r' || *cursor == ',') cursor++;
+        if (*cursor == ']') break;
+        if (*cursor != '{') break;
+        const char *obj_end = rj_object_end(cursor);
+        if (!obj_end) break;
+        char candidate[300], normalized[300];
+        if (rj_string(cursor, obj_end, "name", candidate, sizeof candidate)) {
+            norm_name(candidate, normalized, sizeof normalized);
+            if (name_ok(normalized, wanted) == 2) {
+                game_id = rj_long(cursor, obj_end, "id");
+                if (game_id) break;
+            }
+        }
+        cursor = obj_end;
+    }
+    if (!game_id) return 0;
+    snprintf(api, sizeof api, "https://api.rawg.io/api/games/%ld/movies?key=%s", game_id, rawg_key);
     m.len = 0; json[0] = 0;
-    if (!http_get(u, NULL, &m)) return 0;
-    const char *d = strstr(json, "\"data\":{"); if (!d) return 0;
-    return json_str(d, "480", url, n) || json_str(d, "max", url, n);
+    if (!http_get(api, NULL, &m)) return 0;
+    const char *movies = rj_value(json, NULL, "results");
+    if (!movies || *movies != '[') return 0;
+    cursor = movies + 1;
+    for (int i = 0; i < 8; ++i) {
+        while (*cursor == ' ' || *cursor == '\n' || *cursor == '\r'
+               || *cursor == '\t' || *cursor == ',') cursor++;
+        if (*cursor == ']') break;
+        if (*cursor != '{') break;
+        const char *obj_end = rj_object_end(cursor);
+        if (!obj_end) break;
+        const char *data = rj_value(cursor, obj_end, "data");
+        if (data && *data == '{') {
+            const char *data_end = rj_object_end(data);
+            if (data_end && (rj_string(data, data_end, "480", url, n)
+                || rj_string(data, data_end, "max", url, n))) {
+                if (!strncmp(url, "https://", 8)) return 1;
+                url[0] = 0;
+            }
+        }
+        cursor = obj_end;
+    }
+    return 0;
+}
+
+
+/* Verify the MP4 container AND H.264 video stream before marking a download ready.
+ * ftyp alone accepts unsupported codecs such as AV1/HEVC and will fail on the PS3. */
+static int tr_valid_mp4(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    unsigned char head[8] = {0};
+    int ok = fread(head, 1, sizeof(head), file) == sizeof(head);
+    fclose(file);
+    if (!ok || memcmp(head + 4, "ftyp", 4)) return 0;
+    Mp4 mp4; char reason[100] = {0};
+    if (!mp4_open(&mp4, path, reason, sizeof reason)) {
+        snprintf(tr_err, sizeof tr_err, "unsupported MP4: %.100s", reason);
+        return 0;
+    }
+    ok = mp4.video.present && mp4.video.width >= 16 && mp4.video.height >= 16
+        && mp4.video.width <= 1920 && mp4.video.height <= 1088;
+    mp4_close(&mp4);
+    if (!ok) snprintf(tr_err, sizeof tr_err, "MP4 must contain H.264 video supported by PS3");
+    return ok;
 }
 
 /* keep the 6 most recent trailers on disk */
@@ -1652,6 +1756,7 @@ static void tr_entry(void *arg) {
     static char url[2048]; url[0] = 0;
     mkdir(APPDIR "USRDIR", 0777); mkdir(TR_DIR, 0777);
     snprintf(tr_path, sizeof(tr_path), TR_DIR "/%s.mp4", tr_key);
+    if (file_exists(tr_path) && !tr_valid_mp4(tr_path)) unlink(tr_path);
     if (!file_exists(tr_path)) {
         tr_state = TR_SEARCH;
         /* YouTube is searched FIRST via its metadata API; streaming video is not downloadable. */
@@ -1664,11 +1769,12 @@ static void tr_entry(void *arg) {
             tr_state = TR_DOWNLOAD; tr_now = tr_total = 0;
             char part0[320]; snprintf(part0, sizeof(part0), "%s.part", tr_path);
             int ok0 = http_get_progress(url, part0);
-            if (ok0) { FILE *g = fopen(part0, "rb"); u8 h8[8] = {0}; if (g) { if (fread(h8, 1, 8, g) != 8) h8[4] = 0; fclose(g); } ok0 = !memcmp(h8 + 4, "ftyp", 4); }
+            if (ok0) ok0 = tr_valid_mp4(part0);
             if (ok0) { unlink(tr_path); rename(part0, tr_path); tr_cache_add(tr_key); tr_state = TR_READY; sysThreadExit(0); }
             unlink(part0); url[0] = 0; tr_err[0] = 0; tr_state = TR_SEARCH; fails0 = http_fails;
         }
         if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
+        tr_err[0] = 0;
         rawg_trailer(tr_name, url, 2048);
         if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
         if (!url[0]) {
@@ -1682,9 +1788,14 @@ static void tr_entry(void *arg) {
         for (char *cand = strtok_r(url, "|", &save); cand && !ok && !tr_cancel; cand = strtok_r(NULL, "|", &save)) {
             tr_now = tr_total = 0;
             ok = http_get_progress(cand, part);
-            if (ok) { FILE *g = fopen(part, "rb"); u8 h8[8] = {0}; if (g) { if (fread(h8, 1, 8, g) != 8) h8[4] = 0; fclose(g); } ok = !memcmp(h8 + 4, "ftyp", 4); }
+            if (ok) ok = tr_valid_mp4(part);
         }
-        if (!ok) { unlink(part); if (!tr_cancel && !tr_err[0]) snprintf(tr_err, sizeof(tr_err), "no mp4"); tr_state = tr_cancel ? TR_IDLE : (tr_err[0] && strcmp(tr_err, "no mp4") ? TR_FAIL : TR_NONE); sysThreadExit(0); }
+        if (!ok) {
+            unlink(part);
+            if (!tr_cancel && !tr_err[0]) snprintf(tr_err, sizeof tr_err, "No playable H.264 MP4");
+            tr_state = tr_cancel ? TR_IDLE : TR_FAIL;
+            sysThreadExit(0);
+        }
         unlink(tr_path); rename(part, tr_path);
     }
     tr_cache_add(tr_key);
@@ -2048,10 +2159,8 @@ static int trailer_draw(void) {
     if (tr_state == TR_NONE) {
         tr_state = TR_IDLE;
         if (yt_game_id[0]) {
-            char msg[290];
-            snprintf(msg, sizeof msg, "YouTube: %s | youtube.com/watch?v=%s | no compatible MP4", yt_game_title, yt_game_id);
-            show_toast(msg);
-        } else show_toast(S_TR_NONE);
+            show_toast("YouTube found the game, but cannot provide an MP4 to PS3");
+        } else show_toast("No playable game trailer found; add an MP4 in Arcadia Studio");
         return 0;
     }
     if (tr_state == TR_FAIL) { tr_state = TR_IDLE; char t[300]; snprintf(t, sizeof(t), "(%s)  %s", tr_err, S_TR_FAIL); show_toast(t); return 0; }
