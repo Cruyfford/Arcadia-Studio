@@ -616,7 +616,8 @@ static void worker_entry(void *arg) {
 
 /* history file: one job per line, tab separated */
 static void field(char *dst, int n, char **p) {
-    char *t = strchr(*p, '\t'); int len = t ? (int)(t - *p) : (int)strcspn(*p, "\r\n");
+    int eol = (int)strcspn(*p, "\r\n"); char *t = memchr(*p, '\t', eol);      /* tabs on this line only */
+    int len = t ? (int)(t - *p) : eol;
     snprintf(dst, n, "%.*s", len, *p); *p += len + (t ? 1 : 0);
 }
 static void jobs_save(void) {
