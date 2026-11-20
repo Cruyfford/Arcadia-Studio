@@ -202,6 +202,7 @@ class VideosPage(QWidget):
         m.addSeparator()
         add(m, '☁ رفع الفيديوهات إلى archive.org', self.upload)
         add(m, '🔗 ربط المتجر برابط الفيديوهات', self.link_store)
+        add(m, '🔑 وضع مفتاح RAWG في المتجر (صور الألعاب على الجهاز)', self.put_rawg_key)
         add(m, '📂 فتح مجلد الفيديوهات', self.open_folder)
         add(m, '📁 تغيير مجلد الفيديوهات...', self.change_folder)
         add(m, '🔄 تحديث القائمة', self.reload)
@@ -311,3 +312,12 @@ class VideosPage(QWidget):
         if not url.endswith('/'): url += '/'
         self.win.store.set_text(LINK_FILE, url + '\n'); self.win.store.save()
         QMessageBox.information(self, 'تم', 'تم حفظ الرابط داخل المتجر (%s).\nابنِ المتجر وثبّته على الجهاز ليقرأه التطبيق.' % LINK_FILE)
+
+    def put_rawg_key(self):
+        if not self.win.store: return
+        key = self.e['rawg_key'].text().strip()
+        if not key:
+            QMessageBox.information(self, 'RAWG', 'اكتب مفتاح RAWG في الخانة أولاً.'); return
+        self.win.settings.setValue('rawg_key', key)
+        self.win.store.set_text('USRDIR/RAWG.txt', key + '\n'); self.win.store.save()
+        QMessageBox.information(self, 'تم', 'تم وضع المفتاح داخل المتجر (USRDIR/RAWG.txt).\nابنِ المتجر وثبّته: تطبيق أركاديا سيعرض صور كل لعبة من RAWG في صفحتها تلقائياً.')

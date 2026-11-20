@@ -18,6 +18,9 @@ ICON0     := $(CURDIR)/ICON0.PNG
 PKGFILES  := $(CURDIR)/pkgfiles
 
 CFLAGS    = -O2 -Wall -mcpu=cell $(MACHDEP) $(INCLUDE)
+ifneq ($(strip $(RAWG_KEY)),)
+CFLAGS   += -DRAWG_KEY=\"$(RAWG_KEY)\"
+endif
 CXXFLAGS  = $(CFLAGS)
 LDFLAGS   = $(MACHDEP) -Wl,-Map,$(notdir $@).map
 

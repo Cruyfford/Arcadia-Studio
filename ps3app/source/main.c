@@ -1190,56 +1190,128 @@ static void vid_path(const char *key, char *out, int n) { snprintf(out, n, VID_D
 static int file_exists(const char *p) { struct stat st; return stat(p, &st) == 0 && st.st_size > 16; }
 static int vf_is_missing(const char *key) { for (int i = 0; i < vf_nmiss; i++) if (!strcmp(vf_missing[i], key)) return 1; return 0; }
 
+/* one HTTP GET into a file (or memory when mem != NULL), with the DNS fallback; returns 1 on HTTP success */
+typedef struct { char *buf; size_t len, cap; } MemBuf;
+static size_t mem_write(void *p, size_t sz, size_t n, void *u) {
+    MemBuf *m = (MemBuf *)u; size_t add = sz * n;
+    if (m->len + add + 1 > m->cap) return 0;
+    memcpy(m->buf + m->len, p, add); m->len += add; m->buf[m->len] = 0; return add;
+}
+static int http_get(const char *url, const char *path, MemBuf *mem) {
+    FILE *f = NULL;
+    if (!mem) { f = fopen(path, "wb"); if (!f) return 0; }
+    CURL *c = curl_easy_init(); if (!c) { if (f) fclose(f); return 0; }
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "ArcadiaPS3/1.0");
+    if (mem) { curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, mem_write); curl_easy_setopt(c, CURLOPT_WRITEDATA, mem); }
+    else { curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write); curl_easy_setopt(c, CURLOPT_WRITEDATA, f); }
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 90L);
+    curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
+    CURLcode r = curl_easy_perform(c);
+    struct curl_slist *resolve = NULL;
+    for (int tries = 0; r == CURLE_COULDNT_RESOLVE_HOST && tries < 4 && !vf_quit; tries++) {
+        char *eff = NULL, host[256], ip[32], entry[320];
+        curl_easy_getinfo(c, CURLINFO_EFFECTIVE_URL, &eff);
+        url_host(eff ? eff : url, host, sizeof(host));
+        if (!host[0] || !dns_fallback(host, ip, sizeof(ip))) break;
+        snprintf(entry, sizeof(entry), "%s:80:%s", host, ip); resolve = curl_slist_append(resolve, entry);
+        snprintf(entry, sizeof(entry), "%s:443:%s", host, ip); resolve = curl_slist_append(resolve, entry);
+        curl_easy_setopt(c, CURLOPT_RESOLVE, resolve);
+        if (mem) mem->len = 0;
+        r = curl_easy_perform(c);
+    }
+    curl_easy_cleanup(c);
+    if (resolve) curl_slist_free_all(resolve);
+    if (f) fclose(f);
+    return r == CURLE_OK;
+}
+
+/* RAWG.io: screenshots of the game (shown as a slideshow when the game has no video) */
+#ifndef RAWG_KEY
+#define RAWG_KEY ""
+#endif
+static char rawg_key[64];
+static char vf_name[200];
+#define SHOT_DIR APPDIR "USRDIR/shots"
+#define MAX_SHOTS 6
+
+static void url_encode(const char *s, char *out, int n) {
+    int j = 0;
+    for (; *s && j < n - 4; s++) {
+        unsigned char ch = *s;
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.') out[j++] = ch;
+        else { snprintf(out + j, 4, "%%%02X", ch); j += 3; }
+    }
+    out[j] = 0;
+}
+
+static int rawg_fetch(const char *key, const char *name) {
+    static char json[256 * 1024];
+    char q[400], url[700];
+    url_encode(name, q, sizeof(q));
+    snprintf(url, sizeof(url), "https://api.rawg.io/api/games?key=%s&search=%s&page_size=1&search_precise=true", rawg_key, q);
+    MemBuf m = { json, 0, sizeof(json) }; json[0] = 0;
+    if (!http_get(url, NULL, &m)) return 0;
+    char *p = strstr(json, "\"short_screenshots\"");
+    if (!p) return 0;
+    char *end = strchr(p, ']');
+    mkdir(APPDIR "USRDIR", 0777); mkdir(SHOT_DIR, 0777);
+    int got = 0;
+    while (got < MAX_SHOTS && (p = strstr(p, "\"image\":\"")) && (!end || p < end)) {
+        p += 9;
+        char img[512]; int j = 0;
+        while (*p && *p != '"' && j < (int)sizeof(img) - 1) { if (*p == '\\' && p[1] == '/') p++; img[j++] = *p++; }
+        img[j] = 0;
+        /* smaller copy from RAWG's resizer */
+        char small[600]; const char *mk = strstr(img, "/media/");
+        if (mk && !strstr(img, "/resize/")) snprintf(small, sizeof(small), "%.*s/media/resize/640/-/%s", (int)(mk - img), img, mk + 7);
+        else snprintf(small, sizeof(small), "%s", img);
+        char path[300], part[310];
+        snprintf(path, sizeof(path), SHOT_DIR "/%s_%d.jpg", key, got); snprintf(part, sizeof(part), "%s.part", path);
+        if (http_get(small, part, NULL) || http_get(img, part, NULL)) { unlink(path); if (rename(part, path) == 0) got++; }
+        else unlink(part);
+    }
+    if (got) {
+        char cnt[300]; snprintf(cnt, sizeof(cnt), SHOT_DIR "/%s.shots", key);
+        FILE *f = fopen(cnt, "w"); if (f) { fprintf(f, "%d\n", got); fclose(f); }
+    }
+    return got > 0;
+}
+
 static void vf_entry(void *arg) {
     while (!vf_quit) {
         if (!vf_busy) { usleep(50000); continue; }
-        char key[48], url[700], part[300], dest[300];
-        snprintf(key, sizeof(key), "%s", vf_key);
-        snprintf(url, sizeof(url), "%s%s.avp", vid_base, key);
-        vid_path(key, dest, sizeof(dest)); snprintf(part, sizeof(part), "%s.part", dest);
-        mkdir(APPDIR "USRDIR", 0777); mkdir(VID_DIR, 0777);
+        char key[48], name[200], url[700], part[300], dest[300];
+        snprintf(key, sizeof(key), "%s", vf_key); snprintf(name, sizeof(name), "%s", vf_name);
         int ok = 0;
-        FILE *f = fopen(part, "wb");
-        CURL *c = f ? curl_easy_init() : NULL;
-        if (c) {
-            curl_easy_setopt(c, CURLOPT_URL, url);
-            curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-            curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
-            curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
-            curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
-            curl_easy_setopt(c, CURLOPT_USERAGENT, "ArcadiaPS3");
-            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write);
-            curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
-            curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
-            curl_easy_setopt(c, CURLOPT_TIMEOUT, 90L);
-            curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
-            CURLcode r = curl_easy_perform(c);
-            struct curl_slist *resolve = NULL;
-            for (int tries = 0; r == CURLE_COULDNT_RESOLVE_HOST && tries < 4 && !vf_quit; tries++) {
-                char *eff = NULL, host[256], ip[32], entry[320];
-                curl_easy_getinfo(c, CURLINFO_EFFECTIVE_URL, &eff);
-                url_host(eff ? eff : url, host, sizeof(host));
-                if (!host[0] || !dns_fallback(host, ip, sizeof(ip))) break;
-                snprintf(entry, sizeof(entry), "%s:80:%s", host, ip); resolve = curl_slist_append(resolve, entry);
-                snprintf(entry, sizeof(entry), "%s:443:%s", host, ip); resolve = curl_slist_append(resolve, entry);
-                curl_easy_setopt(c, CURLOPT_RESOLVE, resolve);
-                r = curl_easy_perform(c);
+        if (vid_base[0]) {           /* 1) a real video uploaded with Arcadia Studio */
+            snprintf(url, sizeof(url), "%s%s.avp", vid_base, key);
+            vid_path(key, dest, sizeof(dest)); snprintf(part, sizeof(part), "%s.part", dest);
+            mkdir(APPDIR "USRDIR", 0777); mkdir(VID_DIR, 0777);
+            if (http_get(url, part, NULL)) {
+                FILE *g = fopen(part, "rb"); char mg[4] = {0};
+                if (g) { if (fread(mg, 1, 4, g) != 4) mg[0] = 0; fclose(g); }
+                if (!memcmp(mg, "AVP1", 4)) { unlink(dest); ok = rename(part, dest) == 0; }
             }
-            curl_easy_cleanup(c);
-            if (resolve) curl_slist_free_all(resolve);
-            fclose(f); f = NULL;
-            if (r == CURLE_OK) {
-                FILE *g = fopen(part, "rb"); char m[4] = {0};
-                if (g) { if (fread(m, 1, 4, g) != 4) m[0] = 0; fclose(g); }
-                if (!memcmp(m, "AVP1", 4)) { unlink(dest); ok = rename(part, dest) == 0; }
-            }
+            if (!ok) unlink(part);
         }
-        if (f) fclose(f);
-        if (!ok) { unlink(part); if (vf_nmiss < 64) snprintf(vf_missing[vf_nmiss++], 48, "%s", key); }
+        if (!ok && rawg_key[0] && name[0]) ok = rawg_fetch(key, name);   /* 2) screenshots from RAWG */
+        if (!ok && vf_nmiss < 64) snprintf(vf_missing[vf_nmiss++], 48, "%s", key);
         vf_busy = 0;
     }
     vf_running = 0;
     sysThreadExit(0);
+}
+
+static int shots_count(const char *key) {
+    char p[300]; snprintf(p, sizeof(p), SHOT_DIR "/%s.shots", key);
+    char *b = read_file(p, NULL); if (!b) return 0;
+    int n = atoi(b); free(b); return n > MAX_SHOTS ? MAX_SHOTS : n;
 }
 
 static void vid_unload(void) {
@@ -1283,7 +1355,7 @@ static void vid_step(void) {
 }
 
 /* called every frame while a game page is open */
-static Tex *video_for(Node *n) {
+static Tex *video_for(Node *n, const char *search) {
     char key[48]; key_of(n->title, n->info, key, sizeof(key));
     if (strcmp(key, vid_key)) {
         if (vid_data) vid_unload();
@@ -1292,8 +1364,8 @@ static Tex *video_for(Node *n) {
         if (strcmp(waiting, key)) { snprintf(waiting, sizeof(waiting), "%s", key); vid_wait = 0; }
         vid_wait++;
         if (file_exists(p)) { if (!vf_busy || strcmp(vf_key, key)) vid_load(key); }
-        else if (vid_wait > 20 && vid_base[0] && vf_running && !vf_busy && !vf_is_missing(key)) {
-            snprintf(vf_key, sizeof(vf_key), "%s", key); vf_busy = 1;
+        else if (vid_wait > 20 && (vid_base[0] || rawg_key[0]) && vf_running && !vf_busy && !vf_is_missing(key) && !shots_count(key)) {
+            snprintf(vf_key, sizeof(vf_key), "%s", key); snprintf(vf_name, sizeof(vf_name), "%s", search ? search : ""); vf_busy = 1;
         }
         if (strcmp(key, vid_key)) return NULL;
     }
@@ -1312,6 +1384,12 @@ static void video_init(void) {
         }
         free(b);
     }
+    snprintf(rawg_key, sizeof(rawg_key), "%s", RAWG_KEY);
+    const char *kf[2] = { STORE "USRDIR/RAWG.txt", APPDIR "USRDIR/RAWG.txt" };
+    for (int i = 0; i < 2 && !rawg_key[0]; i++) {
+        char *k = read_file(kf[i], NULL);
+        if (k) { int l = (int)strcspn(k, "\r\n \t"); if (l > 10 && l < 60) snprintf(rawg_key, sizeof(rawg_key), "%.*s", l, k); free(k); }
+    }
 #ifndef HOST_PREVIEW
     vf_running = 1;
     if (sysThreadCreate(&vf_thread, vf_entry, NULL, 1300, 0x20000, 0, "arcadia_vid") != 0) vf_running = 0;
@@ -1328,9 +1406,27 @@ static void draw_game(Level *L) {
     draw_dl_pill(NULL);
 
     /* video when the game has one, else the cover */
-    Tex *vt = video_for(n);
+    const char *search = has_arabic(n->title) && L->title ? L->title : n->title;
+    Tex *vt = video_for(n, search);
     float cs = 238, cx = RX - cs, cy = 58;
-    if (vt) {
+    char skey[48]; key_of(n->title, n->info, skey, sizeof(skey));
+    int ns = vt ? 0 : shots_count(skey);
+    if (!vt && ns) {
+        /* slideshow of RAWG screenshots, 4 s each with a cross-fade */
+        float vw = 320, vh = 180; cx = RX - vw;
+        u32 per = 240, t = frame_no % (per * ns), i = t / per, in = t % per;
+        char pa[300], pb[300];
+        snprintf(pa, sizeof(pa), SHOT_DIR "/%s_%d.jpg", skey, (int)i);
+        snprintf(pb, sizeof(pb), SHOT_DIR "/%s_%d.jpg", skey, (int)((i + 1) % ns));
+        draw_rrect(cx - 3, cy - 3, vw + 6, vh + 6, 14, 0x000000B0);
+        Tex *ta = get_image(icons, ICON_SLOTS, pa), *tb = ns > 1 ? get_image(icons, ICON_SLOTS, pb) : NULL;
+        if (ta) draw_image_fill(ta, cx, cy, vw, vh, 0xFFFFFFFF);
+        if (tb && in > per - 40) draw_image_fill(tb, cx, cy, vw, vh, 0xFFFFFF00 | (u32)((in - (per - 40)) * 255 / 40));
+        for (int k = 0; k < ns; k++) draw_circle(cx + vw / 2 + (k - (ns - 1) / 2.0f) * 10, cy + vh - 8, 2.5f, k == (int)i ? 0xFFFFFFFF : 0xFFFFFF66);
+        Tex *t2 = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
+        if (t2) { draw_rrect(RX - 70, cy + vh - 46, 62, 62, 9, 0x000000C0); draw_image_fit(t2, RX - 68, cy + vh - 44, 58, 58, 0xFFFFFFFF); }
+        text_r("RAWG.io", RX - 80, cy + vh + 16, 8, 0x8F89B3FF, 0);
+    } else if (vt) {
         float vw = 320, vh = 180; cx = RX - vw;
         draw_rrect(cx - 3, cy - 3, vw + 6, vh + 6, 14, 0x000000B0);
         draw_tex_uv(vt, cx, cy, vw, vh, 0, 0, (float)vt->used_w / vt->w, (float)vt->used_h / vt->h, 0xFFFFFFFF);
