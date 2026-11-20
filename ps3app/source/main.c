@@ -1454,7 +1454,7 @@ static int http_get_progress(const char *url, const char *path) {
         curl_easy_setopt(c, CURLOPT_RESOLVE, resolve);
         r = curl_easy_perform(c);
     }
-    if (r != CURLE_OK) snprintf(tr_err, sizeof(tr_err), "curl %d: %s", (int)r, curl_easy_strerror(r));
+    if (r != CURLE_OK && r != CURLE_HTTP_RETURNED_ERROR) snprintf(tr_err, sizeof(tr_err), "curl %d: %s", (int)r, curl_easy_strerror(r));
     curl_easy_cleanup(c);
     if (resolve) curl_slist_free_all(resolve);
     fclose(f);
@@ -1515,8 +1515,21 @@ static int steam_trailer(const char *name, char *url, int n) {
         snprintf(u, sizeof(u), "https://store.steampowered.com/api/appdetails?filters=movies&appids=%ld", ids[c]);
         m.len = 0; json[0] = 0;
         if (!http_get(u, NULL, &m)) continue;
-        const char *mp = strstr(json, "\"mp4\":{"); if (!mp) continue;
-        if (json_str(mp, "480", url, n) || json_str(mp, "max", url, n)) return 1;
+        const char *mv = strstr(json, "\"movies\":["); if (!mv) continue;
+        /* old style: direct mp4 links */
+        const char *mp = strstr(mv, "\"mp4\":{");
+        if (mp && (json_str(mp, "480", url, n) || json_str(mp, "max", url, n))) return 1;
+        /* new style (DASH/HLS only): older trailers still exist as plain files under their movie id */
+        const char *q2 = mv; int got = 0;
+        while (got < 3 && (q2 = strstr(q2, "\"id\":"))) {
+            long mid = atol(q2 + 5); q2 += 5;
+            if (mid <= 0) continue;
+            int l = snprintf(url + strlen(url), n - strlen(url), "%shttps://cdn.akamai.steamstatic.com/steam/apps/%ld/movie480.mp4|https://video.akamai.steamstatic.com/store_trailers/%ld/movie480.mp4",
+                             url[0] ? "|" : "", mid, mid);
+            if (l <= 0) break;
+            got++;
+        }
+        if (url[0]) return 1;
     }
     return 0;
 }
@@ -1553,13 +1566,13 @@ static void tr_cache_add(const char *key) {
 }
 
 static void tr_entry(void *arg) {
-    char url[1024] = "";
+    static char url[2048]; url[0] = 0;
     mkdir(APPDIR "USRDIR", 0777); mkdir(TR_DIR, 0777);
     snprintf(tr_path, sizeof(tr_path), TR_DIR "/%s.mp4", tr_key);
     if (!file_exists(tr_path)) {
         tr_state = TR_SEARCH;
         int fails0 = http_fails;
-        if (!steam_trailer(tr_name, url, sizeof(url)) && !tr_cancel) rawg_trailer(tr_name, url, sizeof(url));
+        if (!steam_trailer(tr_name, url, 2048) && !tr_cancel) { url[0] = 0; rawg_trailer(tr_name, url, 2048); }
         if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
         if (!url[0]) {
             if (http_fails != fails0) { snprintf(tr_err, sizeof(tr_err), "%s", http_err); tr_state = TR_FAIL; }
@@ -1568,7 +1581,13 @@ static void tr_entry(void *arg) {
         }
         tr_state = TR_DOWNLOAD; tr_now = tr_total = 0;
         char part[320]; snprintf(part, sizeof(part), "%s.part", tr_path);
-        if (!http_get_progress(url, part)) { unlink(part); tr_state = tr_cancel ? TR_IDLE : TR_FAIL; sysThreadExit(0); }
+        int ok = 0; char *save = NULL;
+        for (char *cand = strtok_r(url, "|", &save); cand && !ok && !tr_cancel; cand = strtok_r(NULL, "|", &save)) {
+            tr_now = tr_total = 0;
+            ok = http_get_progress(cand, part);
+            if (ok) { FILE *g = fopen(part, "rb"); u8 h8[8] = {0}; if (g) { if (fread(h8, 1, 8, g) != 8) h8[4] = 0; fclose(g); } ok = !memcmp(h8 + 4, "ftyp", 4); }
+        }
+        if (!ok) { unlink(part); if (!tr_cancel && !tr_err[0]) snprintf(tr_err, sizeof(tr_err), "no mp4"); tr_state = tr_cancel ? TR_IDLE : (tr_err[0] && strcmp(tr_err, "no mp4") ? TR_FAIL : TR_NONE); sysThreadExit(0); }
         unlink(tr_path); rename(part, tr_path);
     }
     tr_cache_add(tr_key);
