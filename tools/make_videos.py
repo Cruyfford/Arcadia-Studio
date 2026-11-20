@@ -31,12 +31,12 @@ games = [g for g in json.load(open(os.path.join(os.path.dirname(__file__), 'game
          if shard_of(g['key']) == SHARD]
 if gh('release', 'view', TAG, '-R', REPO, check=False).returncode:
     gh('release', 'create', TAG, '-R', REPO, '-t', 'ARCADIA game videos %d' % SHARD,
-       '-n', 'Short silent game videos (.avp) for the ARCADIA PS3 app. Sources: Steam store and RAWG.io trailers.', check=False)
+       '-n', 'Short silent game videos (.avp) for the ARCADIA PS3 app. Source: RAWG.io trailers.', check=False)
 have = set(gh('release', 'view', TAG, '-R', REPO, '--json', 'assets', '-q', '.assets[].name').stdout.split())
 missing_file = 'missing_%d.txt' % SHARD
 print('shard %d: %d games, %d already published' % (SHARD, len(games), len(have)), flush=True)
 
-sources = [pv.Steam()] + ([pv.Rawg(os.environ['RAWG_KEY'])] if os.environ.get('RAWG_KEY') else [])
+sources = [pv.Rawg(os.environ['RAWG_KEY'])] if os.environ.get('RAWG_KEY') else []
 tmp = tempfile.mkdtemp()
 cache = {}            # search name -> avp path (regions of one game share a clip)
 done = miss = err = 0

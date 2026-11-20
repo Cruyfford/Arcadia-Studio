@@ -1483,55 +1483,22 @@ static void norm_name(const char *s, char *o, int n) {
     o[j] = 0;
 }
 
-static int steam_trailer(const char *name, char *url, int n) {
-    static char json[256 * 1024];
-    char q[400], u[600], want[200];
-    norm_name(name, want, sizeof(want));
-    if (strlen(want) < 3) return 0;
-    url_encode(name, q, sizeof(q));
-    snprintf(u, sizeof(u), "https://store.steampowered.com/api/storesearch/?term=%s&l=english&cc=US", q);
-    MemBuf m = { json, 0, sizeof(json) }; json[0] = 0;
-    if (!http_get(u, NULL, &m)) return 0;
-    const char *p = json;
-    long ids[3]; int nid = 0, exact = -1; size_t bestlen[3];
-    char nm[300], nn[300];
-    while ((p = json_str(p, "name", nm, sizeof(nm)))) {
-        const char *idp = strstr(p, "\"id\":"); if (!idp) break;
-        long id = atol(idp + 5);
-        norm_name(nm, nn, sizeof(nn));
-        size_t ln = strlen(nn), lw = strlen(want);
-        int ok = !strcmp(nn, want) || (lw >= 5 && (!strncmp(nn, want, lw) || (ln >= 5 && !strncmp(want, nn, ln))));
-        if (!ok) continue;
-        if (!strcmp(nn, want) && exact < 0) { exact = nid; }
-        if (nid < 3) { ids[nid] = id; bestlen[nid] = ln; nid++; }
+/* same game? exact name, or the name plus only edition words ("Director's Cut Edition", "GOTY", "Remastered"...) */
+static int name_ok(const char *nn, const char *want) {
+    size_t lw = strlen(want);
+    if (!strcmp(nn, want)) return 2;
+    if (lw < 4 || strncmp(nn, want, lw)) return 0;
+    static const char *words[] = { "the", "directorscut", "directors", "cut", "edition", "complete", "goty", "gameoftheyear",
+        "definitive", "remastered", "remaster", "hd", "deluxe", "ultimate", "gold", "collection", "enhanced", "special",
+        "anniversary", "classic", "classics", "standard", "digital", "premium", "royal", "legacy", "redux", "dx", "plus",
+        "for", "pc", "windows", "steam", "complete", "bundle", "trilogy", "x", "s", NULL };
+    const char *r = nn + lw;
+    while (*r) {
+        int hit = 0;
+        for (int i = 0; words[i]; i++) { size_t l = strlen(words[i]); if (!strncmp(r, words[i], l)) { r += l; hit = 1; break; } }
+        if (!hit) return 0;
     }
-    if (!nid) return 0;
-    /* exact name first, then shorter names (the base game rather than editions/DLC) */
-    for (int a = 0; a < nid; a++) for (int b = a + 1; b < nid; b++) {
-        int sw = (b == exact) || (a != exact && bestlen[b] < bestlen[a]);
-        if (sw) { long t = ids[a]; ids[a] = ids[b]; ids[b] = t; size_t tl = bestlen[a]; bestlen[a] = bestlen[b]; bestlen[b] = tl; if (exact == b) exact = a; else if (exact == a) exact = b; }
-    }
-    for (int c = 0; c < nid; c++) {
-        snprintf(u, sizeof(u), "https://store.steampowered.com/api/appdetails?filters=movies&appids=%ld", ids[c]);
-        m.len = 0; json[0] = 0;
-        if (!http_get(u, NULL, &m)) continue;
-        const char *mv = strstr(json, "\"movies\":["); if (!mv) continue;
-        /* old style: direct mp4 links */
-        const char *mp = strstr(mv, "\"mp4\":{");
-        if (mp && (json_str(mp, "480", url, n) || json_str(mp, "max", url, n))) return 1;
-        /* new style (DASH/HLS only): older trailers still exist as plain files under their movie id */
-        const char *q2 = mv; int got = 0;
-        while (got < 3 && (q2 = strstr(q2, "\"id\":"))) {
-            long mid = atol(q2 + 5); q2 += 5;
-            if (mid <= 0) continue;
-            int l = snprintf(url + strlen(url), n - strlen(url), "%shttps://cdn.akamai.steamstatic.com/steam/apps/%ld/movie480.mp4|https://video.akamai.steamstatic.com/store_trailers/%ld/movie480.mp4",
-                             url[0] ? "|" : "", mid, mid);
-            if (l <= 0) break;
-            got++;
-        }
-        if (url[0]) return 1;
-    }
-    return 0;
+    return 1;
 }
 
 static int rawg_trailer(const char *name, char *url, int n) {
@@ -1539,12 +1506,29 @@ static int rawg_trailer(const char *name, char *url, int n) {
     static char json[256 * 1024];
     char q[400], u[700];
     url_encode(name, q, sizeof(q));
-    snprintf(u, sizeof(u), "https://api.rawg.io/api/games?key=%s&search=%s&page_size=1&search_precise=true", rawg_key, q);
+    snprintf(u, sizeof(u), "https://api.rawg.io/api/games?key=%s&search=%s&page_size=5&search_precise=true", rawg_key, q);
     MemBuf m = { json, 0, sizeof(json) }; json[0] = 0;
     if (!http_get(u, NULL, &m)) return 0;
     const char *r = strstr(json, "\"results\":["); if (!r) return 0;
-    const char *idp = strstr(r, "\"id\":"); if (!idp) return 0;
-    long id = atol(idp + 5); if (!id) return 0;
+    char want[200], nm[300], nn[300]; norm_name(name, want, sizeof(want));
+    long id = 0; int best = 0;
+    /* each result: "id":N,"slug":"...","name":"..." */
+    for (const char *p = r; (p = strstr(p, "\"slug\":\"")); ) {
+        /* only top-level results look like {"id":123,"slug":"..","name":".."} */
+        const char *idp = p; int steps = 0; while (idp > r && strncmp(idp, "\"id\":", 5) && steps++ < 24) idp--;
+        long rid = 0;
+        if (idp > r && !strncmp(idp, "\"id\":", 5)) {
+            const char *d = idp + 5; while (d < p && *d >= '0' && *d <= '9') d++;
+            if (*d == ',' && d + 1 == p) rid = atol(idp + 5);
+        }
+        if (!rid) { p += 8; continue; }
+        const char *after = json_str(p, "name", nm, sizeof(nm)); if (!after) break;
+        norm_name(nm, nn, sizeof(nn));
+        int k = name_ok(nn, want);
+        if (k > best && rid) { best = k; id = rid; if (k == 2) break; }
+        p = after;
+    }
+    if (!id) return 0;
     snprintf(u, sizeof(u), "https://api.rawg.io/api/games/%ld/movies?key=%s", id, rawg_key);
     m.len = 0; json[0] = 0;
     if (!http_get(u, NULL, &m)) return 0;
@@ -1572,7 +1556,7 @@ static void tr_entry(void *arg) {
     if (!file_exists(tr_path)) {
         tr_state = TR_SEARCH;
         int fails0 = http_fails;
-        if (!steam_trailer(tr_name, url, 2048) && !tr_cancel) { url[0] = 0; rawg_trailer(tr_name, url, 2048); }
+        rawg_trailer(tr_name, url, 2048);      /* RAWG only (no Steam lookups) */
         if (tr_cancel) { tr_state = TR_IDLE; sysThreadExit(0); }
         if (!url[0]) {
             if (http_fails != fails0) { snprintf(tr_err, sizeof(tr_err), "%s", http_err); tr_state = TR_FAIL; }
