@@ -278,8 +278,10 @@ class Main(QMainWindow):
         self.device = DevicePage(self)
         from arcadia_studio.ftp_ui import FtpPage
         self.ftp = FtpPage(self)
+        from arcadia_studio.videos_ui import VideosPage
+        self.videos = VideosPage(self)
         self.pages = [('🏪', 'المتجر', store_page), ('📦', 'عارض ومحرر PKG', self.pv), ('🎮', 'محوّل الألعاب', self.conv),
-                      ('🔗', 'فحص الروابط', self.lc), ('⬇', 'التنزيلات', self.dm), ('📂', 'ملفات الجهاز', self.ftp),
+                      ('🔗', 'فحص الروابط', self.lc), ('⬇', 'التنزيلات', self.dm), ('🎬', 'فيديوهات الألعاب', self.videos), ('📂', 'ملفات الجهاز', self.ftp),
                       ('📡', 'الجهاز والنشر', self.device)]
         for i, (ic, name, _) in enumerate(self.pages):
             add(self.view_menu, '%s %s' % (ic, name), lambda i=i: self.nav.setCurrentRow(i), shortcut='Ctrl+%d' % (i + 1))

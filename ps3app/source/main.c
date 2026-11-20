@@ -1145,6 +1145,179 @@ static void draw_grid(Level *L) {
     draw_footer(h, 4, pos);
 }
 
+/* ------------------------------------------------------------------ game videos (.avp: JPEG frames, decoded with the PS3's jpgdec) */
+#define VID_DIR APPDIR "USRDIR/videos"
+#define VID_SLOTS 3
+static char vid_base[512];                 /* from the store: USRDIR/PREVIEWS.txt */
+static Tex vid_tex[VID_SLOTS];
+static int vid_slot = -1;
+static char vid_key[48];                    /* key of what is loaded / being shown */
+static u8 *vid_data; static u32 vid_size, vid_frames, vid_fps, vid_w, vid_h, vid_frame;
+static u32 vid_next_at;
+static int vid_wait;                         /* frames the game page has been open on this key */
+/* fetch thread */
+static volatile int vf_busy, vf_quit, vf_running;
+static char vf_key[48];
+static char vf_missing[64][48]; static int vf_nmiss;
+static sys_ppu_thread_t vf_thread;
+
+static u32 crc32_str(const char *s) {
+    u32 c = 0xFFFFFFFF;
+    for (; *s; s++) { c ^= (u8)*s; for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320 & -(c & 1)); }
+    return ~c;
+}
+/* same rule as preview_key() in Arcadia Studio */
+static void key_of(const char *title, const char *info, char *out, int n) {
+    if (info) for (const char *p = info; *p; p++) {
+        int ok = 1;
+        for (int i = 0; i < 9 && ok; i++) ok = i < 4 ? (p[i] >= 'A' && p[i] <= 'Z') : (p[i] >= '0' && p[i] <= '9');
+        if (ok && (p == info || !((p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= '0' && p[-1] <= '9') || (p[-1] >= 'a' && p[-1] <= 'z')))
+            && !((p[9] >= 'A' && p[9] <= 'Z') || (p[9] >= 'a' && p[9] <= 'z') || (p[9] >= '0' && p[9] <= '9'))) {
+            snprintf(out, n, "%.9s", p); return;
+        }
+    }
+    int j = 0;
+    for (const char *p = title ? title : ""; *p && j < 48 && j < n - 1; p++) {
+        char ch = *p;
+        if (ch >= 'A' && ch <= 'Z') ch += 32;
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) out[j++] = ch;
+    }
+    out[j] = 0;
+    if (!j) snprintf(out, n, "%08x", crc32_str(title ? title : ""));
+}
+
+static void vid_path(const char *key, char *out, int n) { snprintf(out, n, VID_DIR "/%s.avp", key); }
+static int file_exists(const char *p) { struct stat st; return stat(p, &st) == 0 && st.st_size > 16; }
+static int vf_is_missing(const char *key) { for (int i = 0; i < vf_nmiss; i++) if (!strcmp(vf_missing[i], key)) return 1; return 0; }
+
+static void vf_entry(void *arg) {
+    while (!vf_quit) {
+        if (!vf_busy) { usleep(50000); continue; }
+        char key[48], url[700], part[300], dest[300];
+        snprintf(key, sizeof(key), "%s", vf_key);
+        snprintf(url, sizeof(url), "%s%s.avp", vid_base, key);
+        vid_path(key, dest, sizeof(dest)); snprintf(part, sizeof(part), "%s.part", dest);
+        mkdir(APPDIR "USRDIR", 0777); mkdir(VID_DIR, 0777);
+        int ok = 0;
+        FILE *f = fopen(part, "wb");
+        CURL *c = f ? curl_easy_init() : NULL;
+        if (c) {
+            curl_easy_setopt(c, CURLOPT_URL, url);
+            curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
+            curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+            curl_easy_setopt(c, CURLOPT_USERAGENT, "ArcadiaPS3");
+            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write);
+            curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
+            curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+            curl_easy_setopt(c, CURLOPT_TIMEOUT, 90L);
+            curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
+            CURLcode r = curl_easy_perform(c);
+            struct curl_slist *resolve = NULL;
+            for (int tries = 0; r == CURLE_COULDNT_RESOLVE_HOST && tries < 4 && !vf_quit; tries++) {
+                char *eff = NULL, host[256], ip[32], entry[320];
+                curl_easy_getinfo(c, CURLINFO_EFFECTIVE_URL, &eff);
+                url_host(eff ? eff : url, host, sizeof(host));
+                if (!host[0] || !dns_fallback(host, ip, sizeof(ip))) break;
+                snprintf(entry, sizeof(entry), "%s:80:%s", host, ip); resolve = curl_slist_append(resolve, entry);
+                snprintf(entry, sizeof(entry), "%s:443:%s", host, ip); resolve = curl_slist_append(resolve, entry);
+                curl_easy_setopt(c, CURLOPT_RESOLVE, resolve);
+                r = curl_easy_perform(c);
+            }
+            curl_easy_cleanup(c);
+            if (resolve) curl_slist_free_all(resolve);
+            fclose(f); f = NULL;
+            if (r == CURLE_OK) {
+                FILE *g = fopen(part, "rb"); char m[4] = {0};
+                if (g) { if (fread(m, 1, 4, g) != 4) m[0] = 0; fclose(g); }
+                if (!memcmp(m, "AVP1", 4)) { unlink(dest); ok = rename(part, dest) == 0; }
+            }
+        }
+        if (f) fclose(f);
+        if (!ok) { unlink(part); if (vf_nmiss < 64) snprintf(vf_missing[vf_nmiss++], 48, "%s", key); }
+        vf_busy = 0;
+    }
+    vf_running = 0;
+    sysThreadExit(0);
+}
+
+static void vid_unload(void) {
+    free(vid_data); vid_data = NULL; vid_size = vid_frames = 0; vid_slot = -1; vid_key[0] = 0;
+}
+
+static u32 be32p(const u8 *p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
+
+static int vid_load(const char *key) {
+    char p[300]; vid_path(key, p, sizeof(p));
+    long n = 0; char *d = read_file(p, &n);
+    if (!d || n < 20 || memcmp(d, "AVP1", 4)) { free(d); return 0; }
+    const u8 *h = (const u8 *)d;
+    u32 w = (h[4] << 8) | h[5], hh = (h[6] << 8) | h[7], fps = (h[8] << 8) | h[9], fr = be32p(h + 12);
+    if (!fr || w > 640 || hh > 360 || 16 + 4 * (fr + 1) > (u32)n || !fps || fps > 60) { free(d); return 0; }
+    vid_unload();
+    vid_data = (u8 *)d; vid_size = n; vid_w = w; vid_h = hh; vid_fps = fps; vid_frames = fr; vid_frame = 0;
+    snprintf(vid_key, sizeof(vid_key), "%s", key);
+    vid_next_at = frame_no;
+    return 1;
+}
+
+/* decode the next frame into the next texture slot (several slots: a slot is never rewritten while it may be on screen) */
+static void vid_step(void) {
+    if (!vid_data || frame_no < vid_next_at) return;
+    vid_next_at = frame_no + (60 + vid_fps / 2) / vid_fps;
+    const u8 *offs = vid_data + 16;
+    u32 a = be32p(offs + 4 * vid_frame), b = be32p(offs + 4 * (vid_frame + 1));
+    vid_frame = (vid_frame + 1) % vid_frames;
+    if (b <= a || b > vid_size) return;
+    jpgData jd; memset(&jd, 0, sizeof(jd));
+    if (jpgLoadFromBuffer(vid_data + a, b - a, &jd) != 0 || !jd.bmp_out) return;
+    int s = (vid_slot + 1) % VID_SLOTS;
+    Tex *t = &vid_tex[s];
+    if (t->mem) {
+        int w = jd.width < (u32)t->w ? (int)jd.width : t->w, h = jd.height < (u32)t->h ? (int)jd.height : t->h;
+        for (int y = 0; y < h; y++) memcpy(t->mem + y * t->w * 4, (u8 *)jd.bmp_out + y * jd.pitch, w * 4);
+        t->used_w = w; t->used_h = h; vid_slot = s;
+    }
+    free(jd.bmp_out);
+}
+
+/* called every frame while a game page is open */
+static Tex *video_for(Node *n) {
+    char key[48]; key_of(n->title, n->info, key, sizeof(key));
+    if (strcmp(key, vid_key)) {
+        if (vid_data) vid_unload();
+        char p[300]; vid_path(key, p, sizeof(p));
+        static char waiting[48];
+        if (strcmp(waiting, key)) { snprintf(waiting, sizeof(waiting), "%s", key); vid_wait = 0; }
+        vid_wait++;
+        if (file_exists(p)) { if (!vf_busy || strcmp(vf_key, key)) vid_load(key); }
+        else if (vid_wait > 20 && vid_base[0] && vf_running && !vf_busy && !vf_is_missing(key)) {
+            snprintf(vf_key, sizeof(vf_key), "%s", key); vf_busy = 1;
+        }
+        if (strcmp(key, vid_key)) return NULL;
+    }
+    vid_step();
+    return vid_slot >= 0 ? &vid_tex[vid_slot] : NULL;
+}
+
+static void video_init(void) {
+    for (int i = 0; i < VID_SLOTS; i++) { tex_make(&vid_tex[i], 320, 180); if (vid_tex[i].mem) memset(vid_tex[i].mem, 0, 320 * 180 * 4); }
+    char *b = read_file(STORE "USRDIR/PREVIEWS.txt", NULL);
+    if (b) {
+        int l = (int)strcspn(b, "\r\n \t");
+        if (l > 8 && l < (int)sizeof(vid_base) - 2 && !strncmp(b, "http", 4)) {
+            snprintf(vid_base, sizeof(vid_base), "%.*s", l, b);
+            if (vid_base[l - 1] != '/') strcat(vid_base, "/");
+        }
+        free(b);
+    }
+#ifndef HOST_PREVIEW
+    vf_running = 1;
+    if (sysThreadCreate(&vf_thread, vf_entry, NULL, 1300, 0x20000, 0, "arcadia_vid") != 0) vf_running = 0;
+#endif
+}
+
 /* ------------------------------------------------------------------ game page */
 static int gp_open;
 static void draw_game(Level *L) {
@@ -1154,11 +1327,20 @@ static void draw_game(Level *L) {
     text_r(c, RX, 38, 9.3f, C_MUTED, 560);
     draw_dl_pill(NULL);
 
-    /* cover */
+    /* video when the game has one, else the cover */
+    Tex *vt = video_for(n);
     float cs = 238, cx = RX - cs, cy = 58;
-    draw_rrect(cx, cy, cs, cs, 16, 0x00000073);
-    Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
-    if (t) draw_image_fit(t, cx + 6, cy + 6, cs - 12, cs - 12, 0xFFFFFFFF);
+    if (vt) {
+        float vw = 320, vh = 180; cx = RX - vw;
+        draw_rrect(cx - 3, cy - 3, vw + 6, vh + 6, 14, 0x000000B0);
+        draw_tex_uv(vt, cx, cy, vw, vh, 0, 0, (float)vt->used_w / vt->w, (float)vt->used_h / vt->h, 0xFFFFFFFF);
+        Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;      /* small cover over the corner */
+        if (t) { draw_rrect(RX - 70, cy + vh - 46, 62, 62, 9, 0x000000C0); draw_image_fit(t, RX - 68, cy + vh - 44, 58, 58, 0xFFFFFFFF); }
+    } else {
+        draw_rrect(cx, cy, cs, cs, 16, 0x00000073);
+        Tex *t = n->icon ? get_image(icons, ICON_SLOTS, n->icon) : NULL;
+        if (t) draw_image_fit(t, cx + 6, cy + 6, cs - 12, cs - 12, 0xFFFFFFFF);
+    }
 
     float r = cx - 32, mw = r - LX;
     const char *reg = region_of(L);
@@ -1330,6 +1512,7 @@ static void draw_screen(void) {
         return;
     }
     Level *L = &stack[depth];
+    if (!(gp_open && L->n && !dl_view) && vid_data) vid_unload();
     if (dl_view) draw_downloads();
     else if (gp_open && L->n) draw_game(L);
     else if (depth == 0) draw_home(L);
@@ -1436,6 +1619,7 @@ int main(int argc, const char *argv[]) {
     if (font_ok) preload_glyphs();
 
     jobs_load();
+    video_init();
 #ifndef HOST_PREVIEW
     worker_running = 1;
     if (sysThreadCreate(&worker_thread, worker_entry, NULL, 1200, 0x40000, 0, "arcadia_dl") != 0) worker_running = 0;
@@ -1472,8 +1656,8 @@ int main(int argc, const char *argv[]) {
         tiny3d_Flip();
     }
 
-    worker_quit = 1;
-    for (int i = 0; (wm_busy || worker_running) && i < 300; i++) usleep(20000);
+    worker_quit = 1; vf_quit = 1;
+    for (int i = 0; (wm_busy || worker_running || vf_running) && i < 300; i++) usleep(20000);
     jobs_save();
     curl_global_cleanup();
     if (pv_for >= 0) free_level(&pv);
