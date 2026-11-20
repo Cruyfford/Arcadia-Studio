@@ -1614,14 +1614,16 @@ static struct {
     u32 show_osd;
     u32 clock_frames;                        /* fallback clock when there is no audio */
     int64_t last_pts90, frame90; int shown_any;
+    volatile u32 n_sent, n_done, n_pic, n_get_err, n_err, last_err; u32 open_frame;
 } pl;
 
 static int64_t to90(const Mp4Track *t, int64_t v) { return v * 90000 / (t->timescale ? t->timescale : 90000); }
 
 #ifndef HOST_PREVIEW
 static u32 vdec_cb(u32 handle, u32 msgtype, u32 msgdata, u32 arg) {
-    if (msgtype == VDEC_CALLBACK_AUDONE) { if (pl.au_pending > 0) pl.au_pending--; }
-    else if (msgtype == VDEC_CALLBACK_PICOUT) pl.pic_ready++;
+    if (msgtype == VDEC_CALLBACK_AUDONE) { if (pl.au_pending > 0) pl.au_pending--; pl.n_done++; }
+    else if (msgtype == VDEC_CALLBACK_PICOUT) { pl.pic_ready++; pl.n_pic++; }
+    else if (msgtype == VDEC_CALLBACK_ERROR) { pl.n_err++; pl.last_err = msgdata; }
     return 0;
 }
 #endif
@@ -1639,7 +1641,8 @@ static void pl_collect(void) {
             pts = ((int64_t)pi->pts[0].hi << 32) | pi->pts[0].low;
         }
         vdecPictureFormat fmt = { VDEC_PICFMT_ARGB32, VDEC_COLOR_MATRIX_BT709, 0xFF };
-        if (vdecGetPicture(pl.vh, &fmt, f->px) != 0) { pl.pic_ready = 0; return; }
+        int gr = vdecGetPicture(pl.vh, &fmt, f->px);
+        if (gr != 0) { pl.n_get_err++; pl.last_err = (u32)gr; pl.pic_ready = 0; return; }
         pl.pic_ready--;
         if (pts <= pl.last_pts90 || (u32)pts == 0xFFFFFFFF) pts = pl.last_pts90 + pl.frame90;   /* missing/odd timestamps */
         pl.last_pts90 = pts;
@@ -1678,7 +1681,7 @@ static void pl_video(void *arg) {
         pl.au_pending++;
         int r, tries = 0;
         while ((r = vdecDecodeAu(pl.vh, VDEC_DECODER_MODE_NORMAL, &a)) == (int)VDEC_ERROR_BUSY && !pl.stop && tries++ < 2000) { pl_collect(); usleep(1000); }
-        if (r) { pl.au_pending--; }
+        if (r) { pl.au_pending--; pl.n_err++; pl.last_err = (u32)r; } else pl.n_sent++;
         pl_collect();
 #else
         /* host preview only: frames come from ffmpeg instead of the PS3 decoder */
@@ -1848,7 +1851,7 @@ static int player_open(const char *path) {
 #else
     pl.mp4.audio.present = 0;
 #endif
-    pl.active = 1; pl.show_osd = frame_no + 240;
+    pl.active = 1; pl.show_osd = frame_no + 240; pl.open_frame = frame_no;
     pl_start_at(0);
     return 1;
 }
@@ -1906,8 +1909,25 @@ static void player_frame(void) {
     if (t->used_w) {
         float ar = (float)pl.w / pl.h, w = SW, h = SW / ar;
         if (h > SH) { h = SH; w = SH * ar; }
+        /* the decoder's alpha byte is ignored: draw the picture opaque (no alpha test, no blending) */
+        tiny3d_AlphaTest(0, 0x00, TINY3D_ALPHA_FUNC_ALWAYS);
+        tiny3d_BlendFunc(0, TINY3D_BLEND_FUNC_SRC_RGB_SRC_ALPHA | TINY3D_BLEND_FUNC_SRC_ALPHA_SRC_ALPHA,
+                         TINY3D_BLEND_FUNC_DST_RGB_ONE_MINUS_SRC_ALPHA | TINY3D_BLEND_FUNC_DST_ALPHA_ZERO,
+                         TINY3D_BLEND_RGB_FUNC_ADD | TINY3D_BLEND_ALPHA_FUNC_ADD);
         draw_tex_uv(t, (SW - w) / 2, (SH - h) / 2, w, h, 0, 0, (float)t->used_w / t->w, (float)t->used_h / t->h, 0xFFFFFFFF);
+        tiny3d_AlphaTest(1, 0x01, TINY3D_ALPHA_FUNC_GEQUAL);
+        tiny3d_BlendFunc(1, TINY3D_BLEND_FUNC_SRC_RGB_SRC_ALPHA | TINY3D_BLEND_FUNC_SRC_ALPHA_SRC_ALPHA,
+                         TINY3D_BLEND_FUNC_DST_RGB_ONE_MINUS_SRC_ALPHA | TINY3D_BLEND_FUNC_DST_ALPHA_ZERO,
+                         TINY3D_BLEND_RGB_FUNC_ADD | TINY3D_BLEND_ALPHA_FUNC_ADD);
     } else text_c(S_TR_PREP, SW / 2, SH / 2, 13, C_SOFT, 0);
+    /* decoder status: always while no picture has been shown, and with the controls */
+    if (!t->used_w || pl.paused || frame_no < pl.show_osd) {
+        char d[160];
+        snprintf(d, sizeof(d), "%dx%d  AU %u/%u/%u  PIC %u  ERR %u %08X  AUD %s %u",
+                 pl.w, pl.h, pl.n_sent, pl.n_done, pl.mp4.video.count, pl.n_pic, pl.n_err + pl.n_get_err, pl.last_err,
+                 pl.port_open ? "on" : "off", (u32)(pl.audio_frames_played / 48000));
+        draw_text(d, LX, 24, 8.5f, 0xFFFFFF99, 0);
+    }
     /* on-screen controls */
     int done = pl.vdone && pl.fr_r >= pl.fr_w;
     if (pl.paused || frame_no < pl.show_osd || done) {
