@@ -551,6 +551,52 @@ static void url_host(const char *url, char *host, int n) {
     int l = (int)strcspn(p, ":/?#"); snprintf(host, n, "%.*s", l, p);
 }
 
+/* hand the downloaded PKG to the XMB installer queue (same files pkgi-ps3 writes): the game then shows
+   "★ Install ..." in the Game column, one press installs it with the system installer and registers it on the XMB */
+#include "pdb_data.h"
+#define GAME_PKG "/dev_hdd0/vsh/game_pkg"
+static void pdb_str(FILE *f, const char *hdr, const char *v) {
+    u32 n = (u32)strlen(v) + 1; fwrite(hdr, 1, 4, f); fwrite(&n, 4, 1, f); fwrite(&n, 4, 1, f); fwrite(v, 1, n, f);
+}
+static void pdb_u64(FILE *f, const char *hdr, u64 v) { fwrite(hdr, 1, 4, f); fwrite("\0\0\0\x08\0\0\0\x08", 1, 8, f); fwrite(&v, 8, 1, f); }
+static int copy_png(const char *src, const char *dst) {
+    FILE *i = fopen(src, "rb"); if (!i) return 0;
+    unsigned char sig[4] = {0}; fread(sig, 1, 4, i);
+    if (memcmp(sig, "\x89PNG", 4)) { fclose(i); return 0; }
+    FILE *o = fopen(dst, "wb"); if (!o) { fclose(i); return 0; }
+    fwrite(sig, 1, 4, o); char b[8192]; size_t n;
+    while ((n = fread(b, 1, sizeof(b), i)) > 0) fwrite(b, 1, n, o);
+    fclose(i); fclose(o); return 1;
+}
+static int xmb_queue_install(Job *jb) {
+    mkdir("/dev_hdd0/vsh", 0777); mkdir(GAME_PKG, 0777);
+    char dir[128], p[700]; struct stat sb; int id = 0;
+    do snprintf(dir, sizeof(dir), GAME_PKG "/%d", id++); while (stat(dir, &sb) == 0);
+    if (mkdir(dir, 0777) != 0) { snprintf(jb->err, sizeof(jb->err), "mkdir %s", dir); return 0; }
+    struct stat ps; u64 size = stat(jb->final_, &ps) == 0 ? (u64)ps.st_size : 0;
+    char icon[160]; snprintf(icon, sizeof(icon), "%s/ICON_FILE", dir);
+    if (!(jb->icon[0] == '/' && copy_png(jb->icon, icon))) copy_png(STORE "ICON0.PNG", icon);
+    char title[320]; snprintf(title, sizeof(title), "\xE2\x98\x85 Install \"%s\"", jb->title);
+    for (int k = 0; k < 2; k++) {
+        snprintf(p, sizeof(p), "%s/d%d.pdb", dir, k);
+        FILE *f = fopen(p, "wb"); if (!f) { snprintf(jb->err, sizeof(jb->err), "pdb"); return 0; }
+        fwrite(install_data_pdb, 1, install_data_pdb_size, f);
+        pdb_u64(f, "\0\0\0\xD0", size);            /* downloaded size */
+        pdb_u64(f, "\0\0\0\xCE", size);            /* expected size */
+        pdb_str(f, "\0\0\0\x69", title);
+        pdb_str(f, "\0\0\0\xCB", jb->name);         /* pkg file name inside the folder */
+        if (k == 1) pdb_str(f, "\0\0\0\0", icon);
+        pdb_str(f, "\0\0\0\x6A", icon);
+        fwrite(pkg_d0end_data, 1, pkg_d0end_data_size, f);
+        fclose(f);
+    }
+    snprintf(p, sizeof(p), "%s/f0.pdb", dir);
+    { FILE *f = fopen(p, "wb"); if (f) fclose(f); }          /* empty marker, as pkgi writes it */
+    snprintf(p, sizeof(p), "%s/%s", dir, jb->name);
+    if (rename(jb->final_, p) != 0) { snprintf(jb->err, sizeof(jb->err), "move to %s", dir); return 0; }
+    return 1;
+}
+
 static void job_run(Job *jb) {
     int state = J_FAILED;
     mkdir(PKG_DIR, 0777);
@@ -599,7 +645,7 @@ static void job_run(Job *jb) {
         if (r == CURLE_OK && code < 400) {
             unlink(jb->final_);
             if (rename(jb->part, jb->final_) != 0) { snprintf(jb->err, sizeof(jb->err), "rename"); state = J_FAILED; }
-            else state = J_DONE;   /* left in /dev_hdd0/packages: the system installer (Install Package Files) registers it on the XMB */
+            else state = xmb_queue_install(jb) ? J_DONE : J_FAILED;   /* on failure the pkg stays in /dev_hdd0/packages */
         } else if (jb->cancel) state = J_CANCELED;
         else if (jb->pause) state = J_PAUSED;            /* .part kept */
         else if (worker_quit) state = J_QUEUED;          /* app closing: resume next time */
