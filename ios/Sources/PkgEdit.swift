@@ -79,9 +79,14 @@ enum PkgBuilder {
         var done = 0.0
         for it in items where it.flags & 0xFF != 4 {
             let fh = try FileHandle(forReadingFrom: it.url); defer { try? fh.close() }
-            while true {
-                let d = fh.readData(ofLength: 8 << 20); if d.isEmpty { break }
-                qd.update(data: d); done += Double(d.count); progress?(done / total)
+            var eof = false
+            while !eof {
+                // drain each chunk: without a pool the read buffers pile up on a background thread (crash on big PKGs)
+                autoreleasepool {
+                    let d = (try? fh.read(upToCount: 4 << 20)) ?? nil
+                    guard let d = d, !d.isEmpty else { eof = true; return }
+                    qd.update(data: d); done += Double(d.count); progress?(done / total)
+                }
             }
         }
         var hb = base; hb += [UInt8](repeating: 0, count: 0x50)
@@ -104,17 +109,23 @@ enum PkgBuilder {
         var blk: UInt64 = 0
         var carry: [UInt8] = []
         func emit(_ chunk: [UInt8]) {
-            let c = carry + chunk
-            let cut = c.count - c.count % 16
-            if cut > 0 { o.write(Data(crypt(qa, Array(c[0..<cut]), start: blk))); blk += UInt64(cut / 16) }
-            carry = Array(c[cut...])
+            autoreleasepool {
+                let c = carry.isEmpty ? chunk : carry + chunk
+                let cut = c.count - c.count % 16
+                if cut > 0 { o.write(Data(crypt(qa, cut == c.count ? c : Array(c[0..<cut]), start: blk))); blk += UInt64(cut / 16) }
+                carry = cut == c.count ? [] : Array(c[cut...])
+            }
         }
         emit(table)
         for it in items where it.flags & 0xFF != 4 {
             let fh = try FileHandle(forReadingFrom: it.url); defer { try? fh.close() }
-            while true {
-                let d = fh.readData(ofLength: 8 << 20); if d.isEmpty { break }
-                emit([UInt8](d)); done += Double(d.count); progress?(done / total)
+            var eof = false
+            while !eof {
+                autoreleasepool {
+                    let d = (try? fh.read(upToCount: 4 << 20)) ?? nil
+                    guard let d = d, !d.isEmpty else { eof = true; return }
+                    emit([UInt8](d)); done += Double(d.count); progress?(done / total)
+                }
             }
             let pad = Int(((it.size + 15) & ~15) - it.size)
             if pad > 0 { emit([UInt8](repeating: 0, count: pad)) }

@@ -110,7 +110,8 @@ final class PkgReader {
         var pos: UInt64 = 0
         while pos < e.size {
             let n = Int(min(UInt64(8 << 20), e.size - pos))
-            out.write(read(e.offset + pos, n)); pos += UInt64(n); progress?(Int64(n))
+            autoreleasepool { out.write(read(e.offset + pos, n)) }    // free each 8 MB chunk (big PKGs ran out of memory)
+            pos += UInt64(n); progress?(Int64(n))
         }
         return dst
     }
