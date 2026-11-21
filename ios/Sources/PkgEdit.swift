@@ -222,14 +222,7 @@ struct PkgEditView: View {
                 Button { reload() } label: { Label("تحديث", systemImage: "arrow.clockwise") }
             } label: { Image(systemName: "ellipsis.circle") }
         }
-        .docPicker(isPresented: $adding, multiple: true) { urls in
-            for u in urls {
-                let dst = dir.appendingPathComponent(u.lastPathComponent)
-                try? FileManager.default.removeItem(at: dst)
-                try? FileManager.default.copyItem(at: u, to: dst)
-            }
-            reload()
-        }
+        .docPicker(isPresented: $adding, multiple: true) { urls in addFiles(urls) }
         .alert("إعادة تسمية", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("الاسم", text: $newName)
             Button("حفظ") {
@@ -254,6 +247,39 @@ struct PkgEditView: View {
         entries = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
             .filter { !$0.lastPathComponent.hasPrefix(".") }
             .sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
+    }
+
+    /// add or replace files in this folder; a name that matches an existing file (any letter case) replaces it and keeps its name
+    func addFiles(_ urls: [URL]) {
+        let dir = self.dir
+        app.run("جاري نسخ الملفات...") { prog in
+            let fm = FileManager.default
+            let existing = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+            var replaced: [String] = [], added: [String] = [], failed: [String] = []
+            for (i, u) in urls.enumerated() {
+                let scoped = u.startAccessingSecurityScopedResource(); defer { if scoped { u.stopAccessingSecurityScopedResource() } }
+                let name = existing.first { $0.lowercased() == u.lastPathComponent.lowercased() } ?? u.lastPathComponent
+                let dst = dir.appendingPathComponent(name)
+                let had = fm.fileExists(atPath: dst.path)
+                do {
+                    let tmp = dir.appendingPathComponent(".tmp-" + name)
+                    try? fm.removeItem(at: tmp)
+                    try fm.copyItem(at: u, to: tmp)
+                    if had { try fm.removeItem(at: dst) }
+                    try fm.moveItem(at: tmp, to: dst)
+                    let sz = (try? fm.attributesOfItem(atPath: dst.path)[.size] as? Int64) ?? 0
+                    (had ? { replaced.append("\(name)  (\(human(sz)))") } : { added.append("\(name)  (\(human(sz)))") })()
+                } catch { failed.append(name) }
+                prog(Double(i + 1) / Double(urls.count))
+            }
+            await MainActor.run { reload() }
+            var msg: [String] = []
+            if !replaced.isEmpty { msg.append("✔ تم استبدال \(replaced.count):\n" + replaced.joined(separator: "\n")) }
+            if !added.isEmpty { msg.append("➕ تمت إضافة \(added.count):\n" + added.joined(separator: "\n")) }
+            if !failed.isEmpty { msg.append("✖ تعذّر نسخ:\n" + failed.joined(separator: "\n")) }
+            msg.append("لا تنسى: إعادة البناء إلى PKG")
+            return msg.joined(separator: "\n\n")
+        }
     }
 
     func rebuild() {
