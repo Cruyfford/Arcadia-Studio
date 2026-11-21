@@ -287,8 +287,19 @@ struct PkgEditView: View {
         try? FileManager.default.createDirectory(at: built, withIntermediateDirectories: true)
         let out = built.appendingPathComponent(pkgName + "_mod.pkg")
         let root = self.root, cid = contentID
+        let dataSize = PkgBuilder.items(root).reduce(UInt64(0)) { $0 + $1.size }
         app.run("جاري بناء الحزمة...") { prog in
-            try PkgBuilder.pack(folder: root, contentID: cid, out: out) { prog($0) }
+            var lastUI = Date.distantPast
+            try PkgBuilder.pack(folder: root, contentID: cid, out: out) { p in
+                prog(p)
+                guard Date().timeIntervalSince(lastUI) > 0.25 else { return }
+                lastUI = Date()
+                // two passes: checksum, then writing
+                let phase = p < 0.5 ? "التحقق" : "الكتابة"
+                let done = Int64(Double(dataSize) * (p < 0.5 ? p * 2 : (p - 0.5) * 2))
+                let d = "\(phase): \(human(done)) / \(human(Int64(dataSize)))"
+                DispatchQueue.main.async { app.detail = d }
+            }
             // compare with the original: files and data size (the PKG file itself is a little smaller as a debug PKG)
             let now = PkgBuilder.items(root).filter { $0.flags & 0xFF != 4 }
             let nowSize = now.reduce(Int64(0)) { $0 + Int64($1.size) }
