@@ -6,6 +6,7 @@ struct DeviceView: View {
     @AppStorage("ps3_ip") var ip = ""
     @State private var status = "—"
     @State private var pickPkg = false
+    @FocusState private var ipFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -14,6 +15,7 @@ struct DeviceView: View {
                     TextField("IP الجهاز مثل 192.168.1.20", text: Binding(get: { ip }, set: { ip = PS3.cleanIP($0) }))
                         .keyboardType(.decimalPad).autocorrectionDisabled().textInputAutocapitalization(.never)
                         .multilineTextAlignment(.leading).environment(\.layoutDirection, .leftToRight)
+                        .focused($ipFocused).submitLabel(.done)
                     HStack { Text("الحالة"); Spacer(); Text(status).foregroundStyle(.secondary) }
                     Button { test() } label: { Label("اختبار الاتصال", systemImage: "antenna.radiowaves.left.and.right") }.disabled(ip.isEmpty)
                 }
@@ -26,11 +28,19 @@ struct DeviceView: View {
                 }
             }
             .navigationTitle("الجهاز")
+            .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("تم") { ipFocused = false }.bold()
+                }
+            }
             .docPicker(isPresented: $pickPkg) { send($0[0]) }
         }
     }
 
     func test() {
+        ipFocused = false
         status = "⏳"
         Task {
             let (f, w) = await PS3(ip: ip).test()
