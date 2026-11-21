@@ -24,6 +24,7 @@
 #include <jpgdec/jpgdec.h>
 #include <tiny3d.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <curl/curl.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -570,8 +571,8 @@ static int copy_png(const char *src, const char *dst) {
 }
 static int xmb_queue_install(Job *jb) {
     mkdir("/dev_hdd0/vsh", 0777); mkdir(GAME_PKG, 0777);
-    char dir[128], p[700]; struct stat sb; int id = 0;
-    do snprintf(dir, sizeof(dir), GAME_PKG "/%d", id++); while (stat(dir, &sb) == 0);
+    char dir[128], p[700]; struct stat sb; u32 id = 80000002;      /* the XMB only lists task ids from 80000002 (as pkgi-ps3) */
+    do snprintf(dir, sizeof(dir), GAME_PKG "/%u", id++); while (stat(dir, &sb) == 0);
     if (mkdir(dir, 0777) != 0) { snprintf(jb->err, sizeof(jb->err), "mkdir %s", dir); return 0; }
     struct stat ps; u64 size = stat(jb->final_, &ps) == 0 ? (u64)ps.st_size : 0;
     char icon[160]; snprintf(icon, sizeof(icon), "%s/ICON_FILE", dir);
@@ -595,6 +596,20 @@ static int xmb_queue_install(Job *jb) {
     snprintf(p, sizeof(p), "%s/%s", dir, jb->name);
     if (rename(jb->final_, p) != 0) { snprintf(jb->err, sizeof(jb->err), "move to %s", dir); return 0; }
     return 1;
+}
+
+/* earlier builds used ids 0,1,2..: move them to the range the XMB reads */
+static void xmb_queue_fix_ids(void) {
+    DIR *d = opendir(GAME_PKG); if (!d) return;
+    struct dirent *e; char from[128], to[128]; struct stat sb; u32 nid = 80000002;
+    while ((e = readdir(d))) {
+        char *end; unsigned long v = strtoul(e->d_name, &end, 10);
+        if (*e->d_name < '0' || *e->d_name > '9' || *end || v >= 80000000UL) continue;
+        snprintf(from, sizeof(from), GAME_PKG "/%s", e->d_name);
+        do snprintf(to, sizeof(to), GAME_PKG "/%u", nid++); while (stat(to, &sb) == 0);
+        rename(from, to);
+    }
+    closedir(d);
 }
 
 static void job_run(Job *jb) {
@@ -2448,6 +2463,7 @@ int main(int argc, const char *argv[]) {
     boot_step(7);
 
     jobs_load();
+    xmb_queue_fix_ids();
     boot_step(8);
     video_init();
     boot_step(9);
