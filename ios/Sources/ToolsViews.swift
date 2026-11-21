@@ -236,11 +236,18 @@ struct PkgViewerView: View {
         guard let r = reader else { return }
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Edit").appendingPathComponent(r.url.deletingPathExtension().lastPathComponent)
-        if FileManager.default.fileExists(atPath: dir.path) { editRoot = dir; return }
-        let total = r.entries.reduce(Int64(0)) { $0 + Int64($1.size) }
+        // marker next to the folder (not inside it, so it is never packed): written only after a complete extraction
+        let marker = dir.deletingLastPathComponent().appendingPathComponent(dir.lastPathComponent + ".extracted")
+        if FileManager.default.fileExists(atPath: dir.path) {
+            if FileManager.default.fileExists(atPath: marker.path) { editRoot = dir; return }
+            try? FileManager.default.removeItem(at: dir)          // an interrupted extraction: start again
+        }
+        let files = r.entries.filter { !$0.isDir }
+        let total = files.reduce(Int64(0)) { $0 + Int64($1.size) }
         app.run("جاري فك الحزمة للتعديل...") { prog in
             var done: Int64 = 0
             for e in r.entries { _ = try r.extract(e, to: dir) { n in done += n; prog(Double(done) / Double(max(total, 1))) } }
+            try? "\(files.count)\n\(total)".write(to: marker, atomically: true, encoding: .utf8)
             await MainActor.run { editRoot = dir }
             return nil
         }

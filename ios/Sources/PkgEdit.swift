@@ -263,8 +263,20 @@ struct PkgEditView: View {
         let root = self.root, cid = contentID
         app.run("جاري بناء الحزمة...") { prog in
             try PkgBuilder.pack(folder: root, contentID: cid, out: out) { prog($0) }
+            // compare with the original: files and data size (the PKG file itself is a little smaller as a debug PKG)
+            let now = PkgBuilder.items(root).filter { $0.flags & 0xFF != 4 }
+            let nowSize = now.reduce(Int64(0)) { $0 + Int64($1.size) }
+            let marker = root.deletingLastPathComponent().appendingPathComponent(root.lastPathComponent + ".extracted")
+            var msg = "✔ تم البناء: \(now.count) ملف، \(human(nowSize))"
+            if let t = try? String(contentsOf: marker, encoding: .utf8) {
+                let p = t.split(separator: "\n").compactMap { Int64($0) }
+                if p.count == 2 {
+                    msg += "\nالأصلية: \(p[0]) ملف، \(human(p[1]))"
+                    if now.count < Int(p[0]) { msg += "\n⚠ فيه \(Int(p[0]) - now.count) ملف ناقص عن الأصلية (إذا ما حذفتها أنت، افتح الحزمة من جديد)." }
+                }
+            }
             await MainActor.run { share = out }
-            return nil
+            return msg
         }
     }
 }
