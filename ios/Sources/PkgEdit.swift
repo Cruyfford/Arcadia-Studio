@@ -42,7 +42,8 @@ enum PkgBuilder {
                     out.append(Item(rel: rel, flags: 0x80000004, url: p, size: 0)); walk(p)
                 } else {
                     let sz = (try? fm.attributesOfItem(atPath: p.path)[.size] as? UInt64) ?? 0
-                    out.append(Item(rel: rel, flags: 0x80000003, url: p, size: sz))
+                    let isSelf = e.uppercased().hasSuffix("EBOOT.BIN") || e.uppercased().hasSuffix(".SELF") || e.uppercased().hasSuffix(".SPRX")
+                    out.append(Item(rel: rel, flags: isSelf ? 0x80000001 : 0x80000003, url: p, size: sz))
                 }
             }
         }
@@ -205,6 +206,12 @@ struct PkgEditView: View {
                     Button(role: .destructive) { try? FileManager.default.removeItem(at: u); reload() } label: { Label("حذف", systemImage: "trash") }
                 }
             }
+        }
+        .safeAreaInset(edge: .bottom) {
+            Button { rebuild() } label: {
+                Label("إعادة البناء إلى PKG", systemImage: "hammer.fill").frame(maxWidth: .infinity).padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent).padding(.horizontal).padding(.bottom, 6)
         }
         .navigationTitle(dir == root ? "✏ تعديل: \(pkgName)" : dir.lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
