@@ -53,17 +53,40 @@ struct DeviceView: View {
 
     func send(_ u: URL) {
         let ip = self.ip
+        let info = PS3.pkgInfo(u)
         app.run("جاري إرسال \(u.lastPathComponent)...") { prog in
+            let ps3 = PS3(ip: ip)
+            // 1) upload
             let t0 = Date()
-            let remote = try await PS3(ip: ip).sendPKG(u, install: true) { a, b in
+            let remote = try await ps3.sendPKG(u, install: false) { a, b in
                 prog(Double(a) / Double(max(b, 1)))
                 let sp = Double(a) / max(Date().timeIntervalSince(t0), 0.1)
                 let d = "\(human(a)) / \(human(b))  ·  \(human(Int64(sp)))/s"
                 DispatchQueue.main.async { app.detail = d }
             }
-            return "✔ تم إرسال الحزمة للجهاز.\nالتثبيت بدأ على الجهاز، وتقدّمه يطلع على شاشة التلفزيون."
+            // 2) size before the install (a reinstall over an existing game)
+            var baseline: Int64 = 0
+            if let info = info, let f = try? await ps3.ftp() {
+                baseline = await ps3.installedBytes(f, title: info.title).0; f.close()
+            }
+            try await ps3.install(remote)
+            guard let info = info, info.size > 0 else {
+                return "✔ تم إرسال الحزمة للجهاز.\nالتثبيت بدأ على الجهاز، وتقدّمه يطلع على شاشة التلفزيون."
+            }
+            // 3) follow the install on the console (approximate)
+            await MainActor.run {
+                app.busy = "جاري التثبيت على الجهاز (\(info.title))..."; app.progress = 0; app.detail = nil; app.started = Date()
+            }
+            let ok = await ps3.watchInstall(title: info.title, expected: info.size, baseline: baseline) { p, grown in
+                prog(p)
+                let d = "\(human(grown)) / \(human(info.size))  ·  تقريبي"
+                DispatchQueue.main.async { app.detail = d }
+            }
+            return ok ? "✔ تم التثبيت على الجهاز (\(info.title))."
+                      : "✔ تم إرسال الحزمة وبدأ التثبيت.\nما قدرت أتابع التقدّم من الجوال، شوف شاشة التلفزيون."
         }
     }
+
 }
 
 struct FTPBrowser: View {

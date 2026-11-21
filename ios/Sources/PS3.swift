@@ -63,6 +63,62 @@ struct PS3 {
         return files.count
     }
 
+    /// game folder (title id from the content id) and installed size of a PKG
+    static func pkgInfo(_ u: URL) -> (title: String, size: Int64)? {
+        let scoped = u.startAccessingSecurityScopedResource(); defer { if scoped { u.stopAccessingSecurityScopedResource() } }
+        guard let r = try? PkgReader(u) else { return nil }
+        let cid = r.contentID
+        guard cid.count >= 16 else { return nil }
+        let title = String(Array(cid)[7..<16])
+        let size = r.entries.filter { !$0.isDir }.reduce(Int64(0)) { $0 + Int64($1.size) }
+        return (title, size)
+    }
+
+    /// recursive size of a folder over FTP (stops at the deadline)
+    func folderSize(_ f: FTPClient, _ path: String, until: Date) async -> Int64 {
+        guard Date() < until, let items = try? await f.list(path) else { return 0 }
+        var total: Int64 = 0
+        for e in items where e.name != "." && e.name != ".." {
+            if e.isDir { total += await folderSize(f, path + "/" + e.name, until: until) } else { total += e.size }
+        }
+        return total
+    }
+
+    /// bytes now in the game folder + any installer temp folders (_INST_*)
+    func installedBytes(_ f: FTPClient, title: String) async -> (Int64, Bool) {
+        let until = Date().addingTimeInterval(8)
+        var total = await folderSize(f, "/dev_hdd0/game/" + title, until: until)
+        var temp = false
+        if let g = try? await f.list("/dev_hdd0/game") {
+            for e in g where e.isDir && e.name.hasPrefix("_INST_") {
+                temp = true; total += await folderSize(f, "/dev_hdd0/game/" + e.name, until: until)
+            }
+        }
+        return (total, temp)
+    }
+
+    /// follow the install on the console by watching the game folder grow (approximate)
+    func watchInstall(title: String, expected: Int64, baseline: Int64,
+                      progress: @escaping (Double, Int64) -> Void) async -> Bool {
+        guard expected > 0, let f = try? await ftp() else { return false }
+        defer { f.close() }
+        let start = Date(); var last: Int64 = -1; var lastChange = Date(); var sawTemp = false
+        while Date().timeIntervalSince(start) < 3600 {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let (now, temp) = await installedBytes(f, title: title)
+            if temp { sawTemp = true }
+            let grown = max(0, now - baseline)
+            progress(min(Double(grown) / Double(expected), 0.99), grown)
+            if now != last { last = now; lastChange = Date() }
+            let idle = Date().timeIntervalSince(lastChange)
+            if !temp && grown >= expected * 95 / 100 { return true }
+            if !temp && sawTemp && idle > 6 { return true }                 // temp folder moved into place
+            if grown > 0 && !temp && idle > 25 { return true }              // stopped growing
+            if grown == 0 && !temp && Date().timeIntervalSince(start) > 120 { return false }  // nothing seen
+        }
+        return false
+    }
+
     func sendPKG(_ local: URL, install: Bool, progress: @escaping (Int64, Int64) -> Void) async throws -> String {
         let remote = PS3.pkgDir + "/" + local.lastPathComponent.replacingOccurrences(of: " ", with: "_")
         let f = try await ftp(); defer { f.close() }
