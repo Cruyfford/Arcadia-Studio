@@ -10,7 +10,7 @@ import urllib.request
 
 from arcadia_studio.core.sfo import set_sfo_string
 
-REL = 'https://github.com/Cruyfford/Arcadia-Studio/releases/download/ps3app-latest/'
+REL = 'https://github.com/Cruyfford/Arcadia-Studio/releases/download/ps3app-sdk2020/'
 EBOOT_URL = REL + 'EBOOT.BIN'
 APP_FILES = {'EBOOT.BIN': b'SCE\0', 'font.ttf': b'\0\1\0\0'}   # USRDIR files of the app, with their magic
 
@@ -30,7 +30,7 @@ def set_sfo_int(data, key, value):
 def make_bootable(sfo):
     sfo = set_sfo_string(sfo, 'CATEGORY', 'HG')
     sfo = set_sfo_int(sfo, 'BOOTABLE', 1)
-    sfo = set_sfo_int(sfo, 'ATTRIBUTE', 0)
+    sfo = set_sfo_int(sfo, 'ATTRIBUTE', 133)   # same as Apollo Save Tool
     return sfo
 
 
