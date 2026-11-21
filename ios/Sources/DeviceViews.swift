@@ -11,9 +11,9 @@ struct DeviceView: View {
         NavigationStack {
             Form {
                 Section("جهاز PS3 (webMAN MOD)") {
-                    TextField("IP الجهاز مثل 192.168.1.20", text: $ip).keyboardType(.decimalPad).environment(\.layoutDirection, .leftToRight)
-                        .environment(\.locale, Locale(identifier: "en_US"))
-                        .onChange(of: ip) { v in let n = PS3.cleanIP(v); if n != v { ip = n } }
+                    TextField("IP الجهاز مثل 192.168.1.20", text: Binding(get: { ip }, set: { ip = PS3.cleanIP($0) }))
+                        .keyboardType(.decimalPad).autocorrectionDisabled().textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.leading).environment(\.layoutDirection, .leftToRight)
                     HStack { Text("الحالة"); Spacer(); Text(status).foregroundStyle(.secondary) }
                     Button { test() } label: { Label("اختبار الاتصال", systemImage: "antenna.radiowaves.left.and.right") }.disabled(ip.isEmpty)
                 }
