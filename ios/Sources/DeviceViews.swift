@@ -12,6 +12,8 @@ struct DeviceView: View {
             Form {
                 Section("جهاز PS3 (webMAN MOD)") {
                     TextField("IP الجهاز مثل 192.168.1.20", text: $ip).keyboardType(.decimalPad).environment(\.layoutDirection, .leftToRight)
+                        .environment(\.locale, Locale(identifier: "en_US"))
+                        .onChange(of: ip) { v in let n = PS3.cleanIP(v); if n != v { ip = n } }
                     HStack { Text("الحالة"); Spacer(); Text(status).foregroundStyle(.secondary) }
                     Button { test() } label: { Label("اختبار الاتصال", systemImage: "antenna.radiowaves.left.and.right") }.disabled(ip.isEmpty)
                 }
@@ -32,7 +34,10 @@ struct DeviceView: View {
         status = "⏳"
         Task {
             let (f, w) = await PS3(ip: ip).test()
-            await MainActor.run { status = "FTP \(f ? "✅" : "❌")   webMAN \(w ? "✅" : "❌")" }
+            await MainActor.run {
+                status = "FTP \(f ? "✅" : "❌")   webMAN \(w ? "✅" : "❌")"
+                if !f && !w { app.message = ("الجهاز ما رد: تأكد من الـ IP، وإن webMAN MOD مثبّت وشغّال (HFW Tools ← Update ← Homebrew Apps).") }
+            }
         }
     }
 

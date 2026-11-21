@@ -4,7 +4,23 @@ import SwiftUI
 /// webMAN MOD on the console: web commands + FTP
 struct PS3 {
     let ip: String
+    init(ip: String) { self.ip = PS3.cleanIP(ip) }
     static let pkgDir = "/dev_hdd0/packages"
+
+    /// Arabic-Indic / Persian digits and Arabic separators typed on an Arabic keyboard -> 192.168.1.20
+    static func cleanIP(_ s: String) -> String {
+        var out = ""
+        for ch in s.unicodeScalars {
+            switch ch.value {
+            case 0x0660...0x0669: out.unicodeScalars.append(UnicodeScalar(ch.value - 0x0660 + 0x30)!)
+            case 0x06F0...0x06F9: out.unicodeScalars.append(UnicodeScalar(ch.value - 0x06F0 + 0x30)!)
+            case 0x066B, 0x066C, 0x060C, 0x2C: out.append(".")          // ٫ ٬ ، ,
+            case 0x30...0x39, 0x2E: out.unicodeScalars.append(ch)
+            default: break
+            }
+        }
+        return out
+    }
 
     func web(_ path: String) async throws -> Data {
         let enc = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
