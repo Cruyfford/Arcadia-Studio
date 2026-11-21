@@ -456,10 +456,11 @@ static void webman_poll(void) {
 /* ------------------------------------------------------------------ background download queue (no webMAN needed) */
 #define PKG_DIR "/dev_hdd0/packages"
 #define DL_LIST APPDIR "USRDIR/downloads.txt"
-enum { J_QUEUED, J_DOWNLOADING, J_INSTALLING, J_DONE, J_FAILED, J_CANCELED };
+enum { J_QUEUED, J_DOWNLOADING, J_INSTALLING, J_DONE, J_FAILED, J_CANCELED, J_PAUSED };   /* numbers are saved: append only */
+#define J_FINISHED(s) ((s) == J_DONE || (s) == J_FAILED || (s) == J_CANCELED)
 #define MAX_JOBS 96
 typedef struct {
-    volatile int state, cancel, used;
+    volatile int state, cancel, used, pause;
     volatile double now, total, speed;
     char url[1024], title[256], info[160], icon[384], err[160];
     char name[256], final_[512], part[512];
@@ -471,11 +472,24 @@ static volatile int worker_quit, worker_running, jobs_dirty;
 static sys_ppu_thread_t worker_thread;
 static Job *volatile current_job;
 
-static size_t dl_write(void *p, size_t sz, size_t n, void *f) { return fwrite(p, sz, n, (FILE *)f); }
+/* resumable download: the .part file is kept on pause / network error and continued with a Range request */
+typedef struct { FILE *f; Job *j; CURL *c; double off; int checked; } DlCtx;
+static size_t dl_write(void *p, size_t sz, size_t n, void *u) {
+    DlCtx *d = (DlCtx *)u;
+    if (!d->checked) {
+        d->checked = 1;
+        long code = 0; curl_easy_getinfo(d->c, CURLINFO_RESPONSE_CODE, &code);
+        if (d->off > 0 && code == 200) {            /* server ignored the range: start over */
+            d->f = freopen(d->j->part, "wb", d->f); d->off = 0;
+            if (!d->f) return 0;
+        }
+    }
+    return fwrite(p, sz, n, d->f);
+}
 static int dl_progress(void *u, curl_off_t total, curl_off_t now, curl_off_t ut, curl_off_t un) {
-    Job *j = (Job *)u;
-    j->total = (double)total; j->now = (double)now;
-    return (j->cancel || worker_quit) ? 1 : 0;
+    DlCtx *d = (DlCtx *)u; Job *j = d->j;
+    j->total = total > 0 ? d->off + (double)total : 0; j->now = d->off + (double)now;
+    return (j->cancel || j->pause || worker_quit) ? 1 : 0;
 }
 
 static void url_filename(const char *url, char *out, int n) {
@@ -540,10 +554,12 @@ static void url_host(const char *url, char *host, int n) {
 static void job_run(Job *jb) {
     int state = J_FAILED;
     mkdir(PKG_DIR, 0777);
-    FILE *f = fopen(jb->part, "wb");
+    struct stat pst; double off = stat(jb->part, &pst) == 0 ? (double)pst.st_size : 0;
+    FILE *f = fopen(jb->part, off > 0 ? "ab" : "wb");
     snprintf(jb->err, sizeof(jb->err), f ? "curl init" : "open " PKG_DIR " failed");
     CURL *c = f ? curl_easy_init() : NULL;
-    jb->now = jb->total = 0;
+    jb->now = off; jb->total = 0;
+    DlCtx dc = { f, jb, c, off, 0 };
     if (c) {
         static char fbuf[1 << 20]; setvbuf(f, fbuf, _IOFBF, sizeof(fbuf));
         curl_easy_setopt(c, CURLOPT_URL, jb->url);
@@ -553,10 +569,11 @@ static void job_run(Job *jb) {
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
         curl_easy_setopt(c, CURLOPT_USERAGENT, "Mozilla/5.0 (PLAYSTATION 3; 4.92)");
         curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write);
-        curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, &dc);
+        if (off > 0) curl_easy_setopt(c, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)off);
         curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, dl_progress);
-        curl_easy_setopt(c, CURLOPT_XFERINFODATA, jb);
+        curl_easy_setopt(c, CURLOPT_XFERINFODATA, &dc);
         curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
         curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
         curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
@@ -577,7 +594,8 @@ static void job_run(Job *jb) {
         long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
         curl_easy_cleanup(c);
         if (resolve) curl_slist_free_all(resolve);
-        fclose(f); f = NULL;
+        f = dc.f; if (f) fclose(f); f = NULL;
+        if (code == 416 && dc.off > 0) { unlink(jb->part); jb->now = 0; jb->state = J_QUEUED; jobs_dirty = 1; return; }  /* stale .part: start over */
         if (r == CURLE_OK && code < 400) {
             unlink(jb->final_);
             if (rename(jb->part, jb->final_) != 0) { snprintf(jb->err, sizeof(jb->err), "rename"); state = J_FAILED; }
@@ -588,6 +606,7 @@ static void job_run(Job *jb) {
                 else state = J_FAILED;      /* the pkg stays in /dev_hdd0/packages */
             }
         } else if (jb->cancel) state = J_CANCELED;
+        else if (jb->pause) state = J_PAUSED;            /* .part kept */
         else if (worker_quit) state = J_QUEUED;          /* app closing: resume next time */
         else {
             if (r == CURLE_WRITE_ERROR) snprintf(jb->err, sizeof(jb->err), "no space");
@@ -596,7 +615,8 @@ static void job_run(Job *jb) {
         }
     }
     if (f) fclose(f);
-    if (state != J_DONE) unlink(jb->part);
+    if (state == J_CANCELED) unlink(jb->part);           /* paused / failed / closing: keep it to resume */
+    jb->pause = 0;
     jb->state = state;
     jobs_dirty = 1;
 }
@@ -606,7 +626,7 @@ static void worker_entry(void *arg) {
         Job *next = NULL;
         for (int i = 0; i < MAX_JOBS; i++) if (jobs[i].used && jobs[i].state == J_QUEUED) { next = &jobs[i]; break; }
         if (!next) { usleep(100000); continue; }
-        next->cancel = 0; next->state = J_DOWNLOADING; current_job = next;
+        next->cancel = 0; next->pause = 0; next->state = J_DOWNLOADING; current_job = next;
         job_run(next);
         current_job = NULL;
     }
@@ -645,6 +665,7 @@ static void jobs_load(void) {
         while (*p == '\r' || *p == '\n') p++;
         if (!j->url[0]) continue;
         j->state = atoi(st); j->used = 1; j->notified = 1; job_paths(j); k++;
+        struct stat ps; if (j->state == J_PAUSED && stat(j->part, &ps) == 0) j->now = (double)ps.st_size;
     }
     free(txt);
 }
@@ -656,12 +677,16 @@ static void start_download(const char *url, const char *title) {
     char u[1024]; snprintf(u, sizeof(u), "%s", url);
     for (char *c = u; *c && strlen(u) + 3 < sizeof(u); c++) if (*c == ' ') { memmove(c + 3, c + 1, strlen(c + 1) + 1); c[0] = '%'; c[1] = '2'; c[2] = '0'; }
     for (int i = 0; i < MAX_JOBS; i++)
-        if (jobs[i].used && !strcmp(jobs[i].url, u) && jobs[i].state != J_FAILED && jobs[i].state != J_CANCELED) { show_toast(S_ALREADY); return; }
+        if (jobs[i].used && !strcmp(jobs[i].url, u) && jobs[i].state != J_FAILED && jobs[i].state != J_CANCELED) {
+            if (jobs[i].state == J_PAUSED) { jobs[i].state = J_QUEUED; jobs_save(); show_toast(S_RESUME); }   /* X on a paused game resumes it */
+            else show_toast(S_ALREADY);
+            return;
+        }
     Job *j = NULL;
     for (int i = 0; i < MAX_JOBS && !j; i++) if (jobs[i].used && !strcmp(jobs[i].url, u)) j = &jobs[i];     /* retry an old failed one */
     for (int i = 0; i < MAX_JOBS && !j; i++) if (!jobs[i].used) j = &jobs[i];
     if (!j) {   /* full: drop the oldest finished entry */
-        for (int i = 0; i < MAX_JOBS && !j; i++) if (jobs[i].state >= J_DONE) { j = &jobs[i]; }
+        for (int i = 0; i < MAX_JOBS && !j; i++) if (J_FINISHED(jobs[i].state)) { j = &jobs[i]; }
         if (!j) { show_toast(S_FAIL); return; }
     }
     memset(j, 0, sizeof(*j));
@@ -2109,8 +2134,8 @@ static int dl_order[MAX_JOBS], dl_count;
 /* active ones first (in queue order), then finished ones, newest first */
 static void dl_build_order(void) {
     dl_count = 0;
-    for (int i = 0; i < MAX_JOBS; i++) if (jobs[i].used && jobs[i].state <= J_INSTALLING) dl_order[dl_count++] = i;
-    for (int i = MAX_JOBS - 1; i >= 0; i--) if (jobs[i].used && jobs[i].state > J_INSTALLING) dl_order[dl_count++] = i;
+    for (int i = 0; i < MAX_JOBS; i++) if (jobs[i].used && !J_FINISHED(jobs[i].state)) dl_order[dl_count++] = i;
+    for (int i = MAX_JOBS - 1; i >= 0; i--) if (jobs[i].used && J_FINISHED(jobs[i].state)) dl_order[dl_count++] = i;
     if (dl_sel >= dl_count) dl_sel = dl_count ? dl_count - 1 : 0;
 }
 
@@ -2130,7 +2155,7 @@ static void draw_downloads(void) {
     if (dl_sel < dl_top) dl_top = dl_sel;
     if (dl_sel >= dl_top + vis) dl_top = dl_sel - vis + 1;
     int first_done = -1;
-    for (int k = 0; k < dl_count; k++) if (jobs[dl_order[k]].state > J_INSTALLING) { first_done = k; break; }
+    for (int k = 0; k < dl_count; k++) if (J_FINISHED(jobs[dl_order[k]].state)) { first_done = k; break; }
     for (int k = dl_top; k < dl_count && k < dl_top + vis; k++) {
         Job *j = &jobs[dl_order[k]];
         float y = top + (k - dl_top) * (rh + gap);
@@ -2152,6 +2177,7 @@ static void draw_downloads(void) {
         case J_INSTALLING:  st = S_INSTALLING; sc = C_GOLD;  sbg = 0xFFD16624; break;
         case J_DONE:        st = S_INSTOK;     sc = C_MINT;  sbg = 0x2EA06733; break;
         case J_FAILED:      st = S_FAILED;     sc = 0xFF8A9AFF; sbg = 0xFF54702E; break;
+        case J_PAUSED:      st = S_PAUSED;     sc = 0x8FB4FFFF; sbg = 0x5C7CFF26; break;
         default:            st = S_CANCELED2;  sc = C_MUTED; sbg = 0xFFFFFF10; break;
         }
         float cw = text_width(st, 9.5f) + 22;
@@ -2162,15 +2188,19 @@ static void draw_downloads(void) {
 
         text_rb(j->title, tr, y + 27, 13, C_TEXT, maxw);
         char line[200];
-        if (j->state == J_DOWNLOADING || j->state == J_INSTALLING) {
+        if (j->state == J_DOWNLOADING || j->state == J_INSTALLING || (j->state == J_PAUSED && j->now > 0)) {
             float pct = j->total > 0 ? (float)(j->now / j->total) : 0; if (pct > 1) pct = 1;
+            if (j->state == J_PAUSED) {
+                if (j->total > 0) snprintf(line, sizeof(line), "%d%%   %.1f / %.1f MB", (int)(pct * 100), j->now / 1048576.0, j->total / 1048576.0);
+                else snprintf(line, sizeof(line), "%.1f MB", j->now / 1048576.0);
+            } else
             if (j->state == J_DOWNLOADING && j->total > 0) snprintf(line, sizeof(line), "%d%%   %.1f / %.1f MB   \xC2\xB7   %.2f MB/s", (int)(pct * 100), j->now / 1048576.0, j->total / 1048576.0, j->speed / 1048576.0);
             else if (j->state == J_DOWNLOADING) snprintf(line, sizeof(line), "%.1f MB   \xC2\xB7   %.2f MB/s", j->now / 1048576.0, j->speed / 1048576.0);
             else snprintf(line, sizeof(line), "%d%%   %.1f / %.1f MB", (int)(pct * 100), j->now / 1048576.0, j->total / 1048576.0);
             text_r(line, tr, y + 44, 9.3f, 0xCFCBE6FF, maxw);
             float bw = maxw, bx = tr - bw;
             draw_rrect(bx, y + 52, bw, 6, 3, 0xFFFFFF1A);
-            if (pct > 0.005f) draw_rrect(bx + bw * (1 - pct), y + 52, bw * pct, 6, 3, C_ACCENT);
+            if (pct > 0.005f) draw_rrect(bx + bw * (1 - pct), y + 52, bw * pct, 6, 3, j->state == J_PAUSED ? 0x8FB4FF99 : C_ACCENT);
         } else if (j->state == J_FAILED && j->err[0]) {
             snprintf(line, sizeof(line), "%s   \xC2\xB7   %s", j->err, j->info);
             text_r(line, tr, y + 48, 9.3f, 0xFF8A9AFF, maxw);
@@ -2185,7 +2215,9 @@ static void draw_downloads(void) {
     if (dl_count) {
         Job *j = &jobs[dl_order[dl_sel]];
         if (j->state == J_FAILED || j->state == J_CANCELED) h[n++] = (Hint){0, S_RETRY};
-        if (j->state == J_QUEUED || j->state == J_DOWNLOADING) h[n++] = (Hint){4, S_CANCEL3};
+        else if (j->state == J_DOWNLOADING || j->state == J_QUEUED) h[n++] = (Hint){0, S_PAUSE};
+        else if (j->state == J_PAUSED) h[n++] = (Hint){0, S_RESUME};
+        if (j->state == J_QUEUED || j->state == J_DOWNLOADING || j->state == J_PAUSED) h[n++] = (Hint){4, S_CANCEL3};
         else if (j->state != J_INSTALLING) h[n++] = (Hint){4, S_REMOVE};
     }
     h[n++] = (Hint){1, S_BACK};
@@ -2200,12 +2232,16 @@ static void downloads_input(void) {
     if (pressed(K_DOWN)) { if (dl_sel + 1 < dl_count) dl_sel++; }
     if (pressed(K_UP)) { if (dl_sel > 0) dl_sel--; }
     Job *j = &jobs[dl_order[dl_sel]];
-    if (pressed(K_X) && (j->state == J_FAILED || j->state == J_CANCELED)) {
-        j->err[0] = 0; j->cancel = 0; j->notified = 0; j->now = j->total = 0; j->state = J_QUEUED; jobs_save();
+    if (pressed(K_X)) {
+        if (j->state == J_FAILED || j->state == J_CANCELED) {
+            j->err[0] = 0; j->cancel = 0; j->notified = 0; j->now = j->total = 0; j->state = J_QUEUED; jobs_save();
+        } else if (j->state == J_DOWNLOADING) j->pause = 1;                     /* worker stops, keeps .part */
+        else if (j->state == J_QUEUED) { j->state = J_PAUSED; jobs_save(); }
+        else if (j->state == J_PAUSED) { j->err[0] = 0; j->state = J_QUEUED; jobs_save(); }
     }
     if (pressed(K_SQ)) {
         if (j->state == J_DOWNLOADING) j->cancel = 1;
-        else if (j->state == J_QUEUED) { j->state = J_CANCELED; j->notified = 1; jobs_save(); }
+        else if (j->state == J_QUEUED || j->state == J_PAUSED) { unlink(j->part); j->state = J_CANCELED; j->notified = 1; jobs_save(); }
         else if (j->state != J_INSTALLING) { j->used = 0; jobs_save(); }
     }
 }
@@ -2393,11 +2429,11 @@ int main(int argc, const char *argv[]) {
             const char *ic = "/dev_hdd0/game/VIDESTORE/USRDIR/PS3/IMAGENES/PSNSTUFF/";
             const char *t[5] = {"1942: Joint Strike","4 Elements HD","Absolute Supercars","ACE COMBAT INFINITY","Alien Breed"};
             const char *f[5] = {"1942 - Joint Strike.png","4 Elements HD.png","Absolute Supercars.png","Ace Combat Infinity.png","Alien Breed.png"};
-            int st[5] = {J_DOWNLOADING, J_QUEUED, J_DONE, J_FAILED, J_DONE};
+            int st[5] = {J_DOWNLOADING, J_PAUSED, J_QUEUED, J_FAILED, J_DONE};
             for (int i = 0; i < 5; i++) { Job *j = &jobs[i]; memset(j, 0, sizeof(*j)); j->used = 1; j->state = st[i]; j->notified = 1;
                 snprintf(j->title, 256, "%s", t[i]); snprintf(j->info, 160, "NPUB3%04d - %d MB", 24 + i * 100, 130 + i * 300);
                 snprintf(j->icon, 384, "%s%s", ic, f[i]); snprintf(j->url, 1024, "http://x/%d.pkg", i); }
-            jobs[0].now = 84.5e6; jobs[0].total = 136.3e6; jobs[0].speed = 5.0e6; current_job = &jobs[0];
+            jobs[0].now = 84.5e6; jobs[0].total = 136.3e6; jobs[0].speed = 5.0e6; current_job = &jobs[0]; jobs[1].now = 210e6; jobs[1].total = 465e6;
             snprintf(jobs[3].err, 160, "HTTP 404"); } }
 #endif
         tiny3d_Clear(0xFF000000, TINY3D_CLEAR_ALL);

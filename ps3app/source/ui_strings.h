@@ -84,3 +84,6 @@
 #define S_CLOSE "ﻕﻼﻏﺇ"
 #define S_TR_PREP "...ﻞﻴﻐﺸﺘﻟﺍ ﺰﻴﻬﺠﺗ ﺭﺎﺟ"
 #define S_SEEK "ﻊﻴﺟﺮﺗ / ﻢﻳﺪﻘﺗ"
+#define S_PAUSE "ﺖﻗﺆﻣ ﻑﺎﻘﻳﺇ"
+#define S_RESUME "ﻑﺎﻨﺌﺘﺳﺍ"
+#define S_PAUSED "ﺎﺘﻗﺆﻣ ﻒﻗﻮﺘﻣ"
