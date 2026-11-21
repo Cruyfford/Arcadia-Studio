@@ -2333,6 +2333,12 @@ static void boot_step(int k) {
 int main(int argc, const char *argv[]) {
     boot_log("main start");
     tiny3d_Init(1024 * 1024);
+#ifndef HOST_PREVIEW
+    /* full screen: map the 848x512 virtual 2D space to the whole output (tiny3d leaves an overscan margin by default) */
+    tiny3d_UserViewport(1, 0, 0,
+        (float)Video_Resolution.width / 848.0f, (float)Video_Resolution.height / 512.0f,
+        (float)Video_Resolution.width / 1920.0f, (float)Video_Resolution.height / 1080.0f);
+#endif
     boot_log("tiny3d ok");
     boot_step(1);
     ioPadInit(7);
