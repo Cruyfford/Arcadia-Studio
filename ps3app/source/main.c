@@ -599,12 +599,7 @@ static void job_run(Job *jb) {
         if (r == CURLE_OK && code < 400) {
             unlink(jb->final_);
             if (rename(jb->part, jb->final_) != 0) { snprintf(jb->err, sizeof(jb->err), "rename"); state = J_FAILED; }
-            else {
-                jb->state = J_INSTALLING; jb->now = 0; jb->total = 0;
-                char dest[512];
-                if (pkg_install(jb->final_, "/dev_hdd0", dest, sizeof(dest), jb->err, sizeof(jb->err), &jb->now, &jb->total)) { unlink(jb->final_); state = J_DONE; }
-                else state = J_FAILED;      /* the pkg stays in /dev_hdd0/packages */
-            }
+            else state = J_DONE;   /* left in /dev_hdd0/packages: the system installer (Install Package Files) registers it on the XMB */
         } else if (jb->cancel) state = J_CANCELED;
         else if (jb->pause) state = J_PAUSED;            /* .part kept */
         else if (worker_quit) state = J_QUEUED;          /* app closing: resume next time */
@@ -2201,6 +2196,8 @@ static void draw_downloads(void) {
             float bw = maxw, bx = tr - bw;
             draw_rrect(bx, y + 52, bw, 6, 3, 0xFFFFFF1A);
             if (pct > 0.005f) draw_rrect(bx + bw * (1 - pct), y + 52, bw * pct, 6, 3, j->state == J_PAUSED ? 0x8FB4FF99 : C_ACCENT);
+        } else if (j->state == J_DONE) {
+            text_r(S_PKGHOW, tr, y + 48, 9.3f, 0x9FE8C8FF, maxw);
         } else if (j->state == J_FAILED && j->err[0]) {
             snprintf(line, sizeof(line), "%s   \xC2\xB7   %s", j->err, j->info);
             text_r(line, tr, y + 48, 9.3f, 0xFF8A9AFF, maxw);
