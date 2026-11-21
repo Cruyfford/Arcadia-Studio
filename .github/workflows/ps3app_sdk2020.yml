@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['ps3app/**', 'ps3test/**', '.github/workflows/ps3app_sdk2020.yml']
+    paths: ['ps3app/**', 'ps3test/**', 'ps3font/**', '.github/workflows/ps3app_sdk2020.yml']
 permissions:
   contents: write
 jobs:
@@ -36,10 +36,12 @@ jobs:
           export PATH=$PS3DEV/bin:$PS3DEV/ppu/bin:$PATH
           cd ps3test && make pkg TEST_LIBS=0 && cd ..
           cd ps3app && make pkg && cd ..
+          cd ps3font && make pkg && cd ..
           mkdir out
           cp ps3app/build/pkg/USRDIR/EBOOT.BIN out/EBOOT.BIN
           cp ps3app/pkgfiles/USRDIR/font.ttf out/font.ttf
           cp ps3test/ARCTEST0.pkg out/ARCADIA_Test_C.pkg
+          cp ps3font/ARCFONT.pkg out/ARCADIA_Arabic_Font.pkg
       - name: Release
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
