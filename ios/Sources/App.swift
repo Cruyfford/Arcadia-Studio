@@ -10,6 +10,8 @@ final class AppState: ObservableObject {
     @Published var message: String?
     @Published var busy: String?
     @Published var progress: Double?
+    @Published var detail: String?        // e.g. "120 / 800 MB · 5.2 MB/s"
+    var started = Date()
     @Published var tab = 0
     @Published var showXMB = false
 
@@ -50,7 +52,7 @@ final class AppState: ObservableObject {
     }
 
     func run(_ title: String, _ job: @escaping (_ progress: @escaping (Double) -> Void) async throws -> String?) {
-        busy = title; progress = nil
+        busy = title; progress = nil; detail = nil; started = Date()
         Task {
             do {
                 let msg = try await job { p in DispatchQueue.main.async { self.progress = p } }
@@ -86,6 +88,14 @@ struct ArcadiaStudioApp: App {
 
 struct RootView: View {
     @EnvironmentObject var app: AppState
+
+    /// time left from the progress so far
+    func remaining(_ p: Double) -> String? {
+        let t = Date().timeIntervalSince(app.started)
+        guard p > 0.01, t > 1.5, p < 1 else { return nil }
+        let left = Int(t * (1 - p) / p)
+        return left >= 3600 ? String(format: "%d:%02d:%02d", left / 3600, left / 60 % 60, left % 60) : String(format: "%d:%02d", left / 60, left % 60)
+    }
     var body: some View {
         ZStack(alignment: .bottom) {
             TabView(selection: $app.tab) {
@@ -98,7 +108,15 @@ struct RootView: View {
             if let b = app.busy {
                 VStack(spacing: 8) {
                     Text(b).font(.subheadline.bold())
-                    if let p = app.progress { ProgressView(value: p) } else { ProgressView() }
+                    if let p = app.progress {
+                        ProgressView(value: p)
+                        HStack {
+                            Text("\(Int(p * 100))%").font(.caption.monospacedDigit().bold())
+                            Spacer()
+                            if let r = remaining(p) { Text("متبقي \(r)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                        }
+                        if let d = app.detail { Text(d).font(.caption2.monospacedDigit()).foregroundStyle(.secondary).environment(\.layoutDirection, .leftToRight) }
+                    } else { ProgressView() }
                 }
                 .padding(14).frame(maxWidth: 420)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))

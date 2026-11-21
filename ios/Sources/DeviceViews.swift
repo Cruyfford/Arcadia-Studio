@@ -54,8 +54,14 @@ struct DeviceView: View {
     func send(_ u: URL) {
         let ip = self.ip
         app.run("جاري إرسال \(u.lastPathComponent)...") { prog in
-            let remote = try await PS3(ip: ip).sendPKG(u, install: true) { a, b in prog(Double(a) / Double(max(b, 1))) }
-            return "تم الإرسال إلى \(remote)\nوطُلب التثبيت عبر webMAN."
+            let t0 = Date()
+            let remote = try await PS3(ip: ip).sendPKG(u, install: true) { a, b in
+                prog(Double(a) / Double(max(b, 1)))
+                let sp = Double(a) / max(Date().timeIntervalSince(t0), 0.1)
+                let d = "\(human(a)) / \(human(b))  ·  \(human(Int64(sp)))/s"
+                DispatchQueue.main.async { app.detail = d }
+            }
+            return "✔ تم إرسال الحزمة للجهاز.\nالتثبيت بدأ على الجهاز، وتقدّمه يطلع على شاشة التلفزيون."
         }
     }
 }
