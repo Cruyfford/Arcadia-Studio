@@ -1,9 +1,6 @@
 name: PS3 test builds (fresh toolchain)
 on:
-  workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ['ps3test/**', 'ps3font/**', '.github/workflows/ps3fresh.yml']
+  workflow_dispatch:   # old toolchain: its EBOOTs freeze on real HEN consoles. Use ps3app_sdk2020.yml
 permissions:
   contents: write
 jobs:
